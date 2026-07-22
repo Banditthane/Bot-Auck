@@ -1,0 +1,48 @@
+const AUTO_NAME_ERROR_CODES = Object.freeze({
+  VALIDATION: "AUTO_NAME_VALIDATION",
+  TEMPLATE_INVALID: "AUTO_NAME_TEMPLATE_INVALID",
+  RENDER_TOO_LONG: "AUTO_NAME_RENDER_TOO_LONG",
+  CONFIG_NOT_FOUND: "AUTO_NAME_CONFIG_NOT_FOUND",
+  DISABLED: "AUTO_NAME_DISABLED",
+  FORBIDDEN: "AUTO_NAME_FORBIDDEN",
+  INELIGIBLE: "AUTO_NAME_INELIGIBLE",
+  UNMANAGEABLE: "AUTO_NAME_UNMANAGEABLE",
+  CODE_EXHAUSTED: "AUTO_NAME_CODE_EXHAUSTED",
+  SCAN_CONFLICT: "AUTO_NAME_SCAN_CONFLICT",
+  LEASE_LOST: "AUTO_NAME_LEASE_LOST",
+  PROVIDER_FAILURE: "AUTO_NAME_PROVIDER_FAILURE",
+  AUDIT_WRITE_FAILED: "AUTO_NAME_AUDIT_WRITE_FAILED",
+});
+
+const AUTO_NAME_RESULT_CODES = Object.freeze({
+  CONFIGURED: "AUTO_NAME_CONFIGURED",
+  ENABLED: "AUTO_NAME_ENABLED",
+  DISABLED: "AUTO_NAME_DISABLED_RESULT",
+  ASSIGNED: "AUTO_NAME_ASSIGNED",
+  ALREADY_CORRECT: "AUTO_NAME_ALREADY_CORRECT",
+  DRY_RUN_WOULD_ASSIGN: "AUTO_NAME_DRY_RUN_WOULD_ASSIGN",
+  DRY_RUN_WOULD_ALLOCATE: "AUTO_NAME_DRY_RUN_WOULD_ALLOCATE",
+  SCAN_QUEUED: "AUTO_NAME_SCAN_QUEUED",
+  SCAN_BATCH_PROCESSED: "AUTO_NAME_SCAN_BATCH_PROCESSED",
+});
+
+class AutoNameError extends Error {
+  constructor(message, code, details = {}) {
+    super(message);
+    this.name = this.constructor.name;
+    this.code = code;
+    this.details = Object.freeze({ ...details });
+  }
+}
+class AutoNameValidationError extends AutoNameError {}
+class AutoNameAuthorizationError extends AutoNameError {}
+class AutoNameStateError extends AutoNameError {}
+
+module.exports = {
+  AUTO_NAME_ERROR_CODES,
+  AUTO_NAME_RESULT_CODES,
+  AutoNameError,
+  AutoNameValidationError,
+  AutoNameAuthorizationError,
+  AutoNameStateError,
+};

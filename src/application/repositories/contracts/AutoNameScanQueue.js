@@ -1,0 +1,10 @@
+class AutoNameScanQueue {
+  enqueueUnique() { throw new Error("enqueueUnique() is not implemented."); }
+  claimNext() { throw new Error("claimNext() is not implemented."); }
+  heartbeat() { throw new Error("heartbeat() is not implemented."); }
+  saveProgress() { throw new Error("saveProgress() is not implemented."); }
+  complete() { throw new Error("complete() is not implemented."); }
+  fail() { throw new Error("fail() is not implemented."); }
+  getStatus() { throw new Error("getStatus() is not implemented."); }
+}
+module.exports = AutoNameScanQueue;
