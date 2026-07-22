@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const Database = require("better-sqlite3");
+const AutoRoomDatabaseError = require("./AutoRoomDatabaseError");
 
 const V1_COLUMNS = Object.freeze({
   auto_rooms: [
@@ -33,6 +34,11 @@ const V4_COLUMNS = Object.freeze({
   ],
 });
 const V5_COLUMNS = V4_COLUMNS;
+
+const RESERVATION_STATES = Object.freeze({
+  V4: Object.freeze(["reserved", "channel_created", "orphaned"]),
+  V5: Object.freeze(["reserved", "channel_created", "orphaned", "cleaning"]),
+});
 
 const REQUIRED_LEGACY_COLUMNS = Object.freeze({
   auto_rooms: ["channel_id", "guild_id", "owner_id", "trigger_channel_id"],
@@ -81,7 +87,7 @@ const V1_SCHEMA = `
 `;
 
 class AutoRoomDatabase {
-  constructor({ filename, database } = {}) {
+  constructor({ filename, database, migrationHooks = {} } = {}) {
     this.filename = filename || process.env.AUTO_ROOM_DB_PATH || path.resolve(
       __dirname,
       "../../../data/auto-voice-rooms.sqlite"
@@ -100,8 +106,9 @@ class AutoRoomDatabase {
 
     this.connection.pragma("foreign_keys = ON");
     this.connection.pragma("busy_timeout = 5000");
+    this.migrationHooks = migrationHooks;
     if (this.filename !== ":memory:") {
-      this.connection.pragma("journal_mode = WAL");
+      enableWalWithBusyRetry(this.connection, 5000);
     }
     this.migrate();
   }
@@ -114,7 +121,10 @@ class AutoRoomDatabase {
       this.connection.exec("COMMIT");
     } catch (error) {
       if (this.connection.inTransaction) this.connection.exec("ROLLBACK");
-      throw error;
+      if (error instanceof AutoRoomDatabaseError || /^SQLITE_(BUSY|LOCKED)/.test(error?.code || "")) {
+        throw error;
+      }
+      throw new AutoRoomDatabaseError(error?.message, { cause: error });
     }
   }
 
@@ -128,8 +138,7 @@ class AutoRoomDatabase {
       return;
     }
     if (currentVersion === 4) {
-      this._validateV4Schema();
-      this._migrateV4ToV5Locked();
+      this._migrateVersion4Locked();
       return;
     }
     if (currentVersion === 3) {
@@ -208,6 +217,27 @@ class AutoRoomDatabase {
     this._migrateV2ToV3Locked();
     this._migrateV3ToV4Locked();
     this._migrateV4ToV5Locked();
+  }
+
+  _migrateVersion4Locked() {
+    this._validateV4Shape();
+    const stateShape = this._classifyReservationStateConstraint();
+    if (stateShape === "v4") {
+      this._validateV4Schema();
+      this._migrateV4ToV5Locked();
+      return;
+    }
+    if (stateShape !== "v5") {
+      throw new AutoRoomDatabaseError("Database schema v4 reservation state constraint is invalid.");
+    }
+
+    this._checkpoint("beforeHybridValidation");
+    this._validateExactV5Schema();
+    this._repairRoomNumberCounters();
+    this._checkpoint("afterHybridCounterRepair");
+    this._validateExactV5Schema();
+    this._checkpoint("beforeHybridVersionStamp");
+    this.connection.pragma("user_version = 5");
   }
 
   _migrateV1ToV2Locked() {
@@ -428,41 +458,28 @@ class AutoRoomDatabase {
   }
 
   _validateV4Schema() {
-    this._validateV2Schema();
-    const table = "auto_room_number_reservations";
-    if (!this._tableExists(table)) throw new Error("Database schema v4 is missing reservation table.");
-    const info = this.connection.pragma(`table_info(${table})`);
-    const expected = V4_COLUMNS[table];
-    if (info.length !== expected.length || !expected.every((name, index) => info[index].name === name)) {
-      throw new Error("Database schema v4 reservation table has invalid columns.");
+    this._validateV4Shape();
+    if (this._classifyReservationStateConstraint() !== "v4") {
+      throw new Error("Database schema v4 reservation state constraint is invalid.");
     }
-    const types = { reservation_id: "TEXT", guild_id: "TEXT", room_number: "INTEGER", created_at: "INTEGER", channel_id: "TEXT", state: "TEXT", updated_at: "INTEGER" };
-    for (const [name, type] of Object.entries(types)) {
-      if (String(info.find((entry) => entry.name === name)?.type || "").toUpperCase() !== type) {
-        throw new Error(`Database schema v4 reservation ${name} must declare type ${type}.`);
-      }
-    }
-    if (info.find((entry) => entry.name === "reservation_id")?.pk !== 1) throw new Error("Database schema v4 reservation_id is not a primary key.");
-    for (const name of ["guild_id", "room_number", "created_at", "state", "updated_at"]) {
-      if (info.find((entry) => entry.name === name)?.notnull !== 1) throw new Error(`Database schema v4 reservation ${name} must be NOT NULL.`);
-    }
-    const unique = this.connection.pragma(`index_list(${table})`).filter((index) => index.unique === 1).some((index) => {
-      const columns = this.connection.pragma(`index_info(${index.name})`).map((entry) => entry.name);
-      return columns.length === 2 && columns[0] === "guild_id" && columns[1] === "room_number";
-    });
-    if (!unique) throw new Error("Database schema v4 is missing the guild/room reservation unique constraint.");
-    const sql = this.connection.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)?.sql?.replace(/\s+/g, " ") || "";
-    if (!/CHECK\s*\(\s*room_number\s*>=\s*1\s*\)/i.test(sql)) throw new Error("Database schema v4 reservation room_number constraint is invalid.");
-    if (!/CHECK\s*\(\s*state\s+IN\s*\(\s*'reserved'\s*,\s*'channel_created'\s*,\s*'orphaned'\s*\)\s*\)/i.test(sql)) throw new Error("Database schema v4 reservation state constraint is invalid.");
   }
 
   _validateV5Schema() {
     this._validateV4Shape();
-    const sql = this.connection.prepare(
-      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auto_room_number_reservations'"
-    ).get()?.sql?.replace(/\s+/g, " ") || "";
-    if (!/CHECK\s*\(\s*state\s+IN\s*\(\s*'reserved'\s*,\s*'channel_created'\s*,\s*'orphaned'\s*,\s*'cleaning'\s*\)\s*\)/i.test(sql)) {
+    if (this._classifyReservationStateConstraint() !== "v5") {
       throw new Error("Database schema v5 reservation state constraint is invalid.");
+    }
+  }
+
+  _validateExactV5Schema() {
+    this._validateV5Schema();
+    this._validateExactBaseShape();
+    const integrity = this.connection.pragma("integrity_check");
+    if (integrity.length !== 1 || integrity[0].integrity_check !== "ok") {
+      throw new Error("Database integrity check failed.");
+    }
+    if (this.connection.pragma("foreign_key_check").length !== 0) {
+      throw new Error("Database foreign key check failed.");
     }
   }
 
@@ -471,11 +488,8 @@ class AutoRoomDatabase {
     const original = this.connection.prepare(
       "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auto_room_number_reservations'"
     ).get()?.sql;
-    // Reuse all structural v4 checks while accepting either state CHECK; the
-    // version-specific validator verifies the exact state set afterwards.
     if (!original) throw new Error("Database schema reservation table is missing.");
-    const normalized = original.replace(/'cleaning'\s*,?\s*/i, "");
-    this.connection.prepare("SELECT 1").get();
+    const normalized = original.replace(/\s+/g, " ");
     const table = "auto_room_number_reservations";
     const info = this.connection.pragma(`table_info(${table})`);
     const expected = V5_COLUMNS[table];
@@ -486,9 +500,93 @@ class AutoRoomDatabase {
     for (const name of ["guild_id", "room_number", "created_at", "state", "updated_at"]) if (info.find((entry) => entry.name === name)?.notnull !== 1) throw new Error(`Database schema v5 reservation ${name} must be NOT NULL.`);
     const unique = this.connection.pragma(`index_list(${table})`).filter((index) => index.unique === 1).some((index) => { const columns = this.connection.pragma(`index_info(${index.name})`).map((entry) => entry.name); return columns.length === 2 && columns[0] === "guild_id" && columns[1] === "room_number"; });
     if (!unique) throw new Error("Database schema v5 is missing the guild/room reservation unique constraint.");
-    if (!/CHECK\s*\(\s*room_number\s*>=\s*1\s*\)/i.test(normalized)) throw new Error("Database schema v5 reservation room_number constraint is invalid.");
+    const roomNumberChecks = extractCheckExpressions(normalized)
+      .filter((expression) => /\broom_number\b/i.test(expression));
+    if (
+      roomNumberChecks.length !== 1 ||
+      normalizeCheck(roomNumberChecks[0]) !== "check(room_number>=1)"
+    ) throw new Error("Database schema v5 reservation room_number constraint is invalid.");
   }
 
+  _classifyReservationStateConstraint() {
+    const sql = this.connection.prepare(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auto_room_number_reservations'"
+    ).get()?.sql || "";
+    const stateChecks = extractCheckExpressions(sql).filter((expression) => /\bstate\b/i.test(expression));
+    if (stateChecks.length !== 1) return "invalid";
+    const match = stateChecks[0].match(/^CHECK\s*\(\s*state\s+IN\s*\((.*)\)\s*\)$/i);
+    if (!match) return "invalid";
+    const values = [...match[1].matchAll(/'([^']*)'/g)].map((entry) => entry[1]);
+    const residue = match[1].replace(/'[^']*'/g, "").replace(/[\s,]/g, "");
+    if (residue) return "invalid";
+    if (sameValues(values, RESERVATION_STATES.V4)) return "v4";
+    if (sameValues(values, RESERVATION_STATES.V5)) return "v5";
+    return "invalid";
+  }
+
+  _validateExactBaseShape() {
+    const shapes = {
+      auto_rooms: {
+        columns: V2_COLUMNS.auto_rooms,
+        types: ["TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "INTEGER", "TEXT", "TEXT", "INTEGER", "INTEGER", "INTEGER", "INTEGER"],
+        notnull: [0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0],
+        pk: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      },
+      room_grants: {
+        columns: V2_COLUMNS.room_grants,
+        types: ["TEXT", "TEXT", "TEXT", "INTEGER"],
+        notnull: [1, 1, 1, 0],
+        pk: [1, 2, 0, 0],
+      },
+      guild_room_configs: {
+        columns: V2_COLUMNS.guild_room_configs,
+        types: ["TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "TEXT", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER"],
+        notnull: [0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1],
+        pk: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      },
+    };
+    for (const [table, expected] of Object.entries(shapes)) {
+      const info = this.connection.pragma(`table_info(${table})`);
+      if (info.length !== expected.columns.length) throw new Error(`Database schema table ${table} has invalid columns.`);
+      info.forEach((column, index) => {
+        if (
+          column.name !== expected.columns[index] ||
+          String(column.type).trim().toUpperCase() !== expected.types[index] ||
+          column.notnull !== expected.notnull[index] || column.pk !== expected.pk[index]
+        ) throw new Error(`Database schema table ${table} has an invalid declaration.`);
+      });
+    }
+    const requiredChecks = {
+      auto_rooms: [
+        "check(modein('open','locked','hidden'))",
+        "check(user_limitbetween0and99)",
+        "check(room_numberisnullorroom_number>=1)",
+      ],
+      room_grants: ["check(accessin('allowed','denied'))"],
+      guild_room_configs: [
+        "check(default_user_limitbetween0and99)",
+        "check(empty_delete_delay_secondsbetween0and300)",
+        "check(enabledin(0,1))",
+        "check(next_room_number>=1)",
+      ],
+    };
+    for (const [table, expectedChecks] of Object.entries(requiredChecks)) {
+      const sql = this.connection.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?"
+      ).get(table)?.sql || "";
+      const actualChecks = extractCheckExpressions(sql).map(normalizeCheck);
+      for (const expected of expectedChecks) {
+        if (actualChecks.filter((check) => check === expected).length !== 1) {
+          throw new Error(`Database schema table ${table} has an invalid CHECK constraint.`);
+        }
+      }
+    }
+  }
+
+  _checkpoint(name) {
+    const hook = this.migrationHooks?.[name];
+    if (typeof hook === "function") hook();
+  }
   _rebuildLegacyTables(existing) {
     const legacyNames = new Set(existing);
     for (const table of ["room_grants", "guild_room_configs", "auto_rooms"]) {
@@ -564,3 +662,59 @@ class AutoRoomDatabase {
 }
 
 module.exports = AutoRoomDatabase;
+
+function sameValues(actual, expected) {
+  return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+}
+
+function extractCheckExpressions(sql) {
+  const expressions = [];
+  const upper = sql.toUpperCase();
+  let offset = 0;
+  while (offset < sql.length) {
+    const checkAt = upper.indexOf("CHECK", offset);
+    if (checkAt === -1) break;
+    let cursor = checkAt + 5;
+    while (/\s/.test(sql[cursor] || "")) cursor += 1;
+    if (sql[cursor] !== "(") { offset = cursor; continue; }
+    let depth = 0;
+    let quoted = false;
+    for (let end = cursor; end < sql.length; end += 1) {
+      const character = sql[end];
+      if (character === "'") {
+        if (quoted && sql[end + 1] === "'") { end += 1; continue; }
+        quoted = !quoted;
+      } else if (!quoted && character === "(") depth += 1;
+      else if (!quoted && character === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          expressions.push(sql.slice(checkAt, end + 1).replace(/\s+/g, " ").trim());
+          offset = end + 1;
+          break;
+        }
+      }
+    }
+    if (offset <= checkAt) break;
+  }
+  return expressions;
+}
+
+function normalizeCheck(expression) {
+  return expression.replace(/\s+/g, "").toLowerCase();
+}
+
+function enableWalWithBusyRetry(connection, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  while (true) {
+    try {
+      if (connection.pragma("journal_mode", { simple: true }) !== "wal") {
+        connection.pragma("journal_mode = WAL");
+      }
+      return;
+    } catch (error) {
+      if (!/^SQLITE_(BUSY|LOCKED)/.test(error?.code || "") || Date.now() >= deadline) throw error;
+      Atomics.wait(signal, 0, 0, 25);
+    }
+  }
+}

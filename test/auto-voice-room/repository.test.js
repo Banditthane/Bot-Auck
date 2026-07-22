@@ -55,6 +55,48 @@ function createEmptyV1Database(filename) {
   connection.close();
 }
 
+function createExactHybridFile(filename) {
+  const database = new AutoRoomDatabase({ filename });
+  const configs = new SqliteGuildRoomConfigRepository(database);
+  const rooms = new SqliteAutoRoomRepository(database);
+  configs.upsert({ guildId: "100", triggerChannelId: "400", categoryId: "600", updatedAt: 1 });
+  configs.upsert({ guildId: "101", triggerChannelId: "401", categoryId: "601", updatedAt: 2 });
+  rooms.create(room({ roomNumber: 4 }));
+  rooms.setGrant({ channelId: "200", userId: "500", access: "allowed", expiresAt: 99 });
+  database.connection.exec(`
+    INSERT INTO auto_room_number_reservations
+      (reservation_id, guild_id, room_number, created_at, channel_id, state, updated_at)
+    VALUES
+      ('r1', '100', 5, 10, NULL, 'reserved', 11),
+      ('r2', '100', 6, 20, '900', 'channel_created', 21),
+      ('r3', '100', 7, 30, '901', 'orphaned', 31),
+      ('r4', '100', 8, 40, '902', 'cleaning', 41),
+      ('r5', '101', 2, 50, NULL, 'reserved', 51);
+    UPDATE guild_room_configs SET next_room_number = 2 WHERE guild_id = '100';
+    UPDATE guild_room_configs SET next_room_number = 20 WHERE guild_id = '101';
+    PRAGMA user_version = 4;
+  `);
+  database.close();
+}
+
+function recoverySnapshot(connection) {
+  const rows = (table, order) => connection.prepare(`SELECT * FROM ${table} ORDER BY ${order}`).all();
+  return {
+    rooms: rows("auto_rooms", "channel_id"),
+    grants: rows("room_grants", "channel_id, user_id"),
+    configs: rows("guild_room_configs", "guild_id"),
+    reservations: rows("auto_room_number_reservations", "reservation_id"),
+    schema: connection.prepare(
+      "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name"
+    ).all(),
+    reservationSql: connection.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='auto_room_number_reservations'"
+    ).get().sql,
+    reservationRootPage: connection.prepare(
+      "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='auto_room_number_reservations'"
+    ).get().rootpage,
+  };
+}
 test("migrations are idempotent and repositories preserve the room model", () => {
   const fixture = createFixture();
   fixture.database.migrate();
@@ -711,6 +753,209 @@ test("malformed v4 fails closed before rebuild and preserves reservation rows", 
   connection.close();
 });
 
+test("exact v5-shape version-4 hybrid stamps metadata without rebuilding or losing data", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "auto-room-exact-hybrid-"));
+  const filename = path.join(directory, "rooms.sqlite");
+  createExactHybridFile(filename);
+  const beforeConnection = new Database(filename);
+  const before = recoverySnapshot(beforeConnection);
+  beforeConnection.close();
+
+  let recovered;
+  try {
+    recovered = new AutoRoomDatabase({ filename });
+    const after = recoverySnapshot(recovered.connection);
+    assert.equal(recovered.connection.pragma("user_version", { simple: true }), 5);
+    assert.deepEqual(after.rooms, before.rooms);
+    assert.deepEqual(after.grants, before.grants);
+    assert.deepEqual(after.reservations, before.reservations);
+    assert.deepEqual(after.schema, before.schema);
+    assert.equal(after.reservationSql, before.reservationSql);
+    assert.equal(after.reservationRootPage, before.reservationRootPage);
+    assert.deepEqual(after.configs.map(({ next_room_number, ...row }) => row),
+      before.configs.map(({ next_room_number, ...row }) => row));
+    assert.deepEqual(after.configs.map((row) => [row.guild_id, row.next_room_number]), [
+      ["100", 9], ["101", 20],
+    ]);
+    assert.deepEqual(recovered.connection.pragma("integrity_check"), [{ integrity_check: "ok" }]);
+    assert.deepEqual(recovered.connection.pragma("foreign_key_check"), []);
+    assert.equal(recovered.connection.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_v4'"
+    ).get(), undefined);
+    recovered.close();
+    recovered = new AutoRoomDatabase({ filename });
+    assert.deepEqual(recoverySnapshot(recovered.connection), after);
+  } finally {
+    recovered?.close();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("exact hybrid rollback preserves metadata rows schema and counter at every mutation checkpoint", () => {
+  for (const checkpoint of ["beforeHybridValidation", "afterHybridCounterRepair", "beforeHybridVersionStamp"]) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `auto-room-hybrid-rollback-${checkpoint}-`));
+    const filename = path.join(directory, "rooms.sqlite");
+    createExactHybridFile(filename);
+    const connection = new Database(filename);
+    const before = recoverySnapshot(connection);
+    try {
+      assert.throws(
+        () => new AutoRoomDatabase({
+          database: connection,
+          migrationHooks: { [checkpoint]() { throw new Error(`injected-${checkpoint}`); } },
+        }),
+        (error) => error.code === "AUTO_ROOM_SCHEMA_INVALID"
+      );
+      assert.equal(connection.pragma("user_version", { simple: true }), 4);
+      assert.deepEqual(recoverySnapshot(connection), before);
+      assert.equal(connection.inTransaction, false);
+    } finally {
+      connection.close();
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  }
+});
+
+test("malformed and ambiguous version-4 hybrids fail closed without mutation", () => {
+  const variants = [
+    { name: "reordered-state", definition: "state TEXT NOT NULL CHECK(state IN ('reserved', 'orphaned', 'channel_created', 'cleaning'))" },
+    { name: "extra-state", definition: "state TEXT NOT NULL CHECK(state IN ('reserved', 'channel_created', 'orphaned', 'cleaning', 'extra'))" },
+    { name: "additional-state-check", definition: "state TEXT NOT NULL CHECK(state IN ('reserved', 'channel_created', 'orphaned', 'cleaning')) CHECK(state <> '')" },
+    { name: "wrong-room-check", definition: "state TEXT NOT NULL CHECK(state IN ('reserved', 'channel_created', 'orphaned', 'cleaning'))", roomCheck: "CHECK(room_number > 0)" },
+    { name: "wrong-state-type", definition: "state BLOB NOT NULL CHECK(state IN ('reserved', 'channel_created', 'orphaned', 'cleaning'))" },
+    { name: "nullable-state", definition: "state TEXT CHECK(state IN ('reserved', 'channel_created', 'orphaned', 'cleaning'))" },
+    { name: "extra-column", definition: "state TEXT NOT NULL CHECK(state IN ('reserved', 'channel_created', 'orphaned', 'cleaning'))", extraColumn: true },
+    { name: "missing-unique", definition: "state TEXT NOT NULL CHECK(state IN ('reserved', 'channel_created', 'orphaned', 'cleaning'))", omitUnique: true },
+  ];
+
+  for (const variant of variants) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `auto-room-hybrid-${variant.name}-`));
+    const filename = path.join(directory, "rooms.sqlite");
+    createExactHybridFile(filename);
+    const connection = new Database(filename);
+    try {
+      connection.exec(`
+        DROP TABLE auto_room_number_reservations;
+        CREATE TABLE auto_room_number_reservations (
+          reservation_id TEXT PRIMARY KEY,
+          guild_id TEXT NOT NULL,
+          room_number INTEGER NOT NULL ${variant.roomCheck || "CHECK(room_number >= 1)"},
+          created_at INTEGER NOT NULL,
+          channel_id TEXT,
+          ${variant.definition},
+          updated_at INTEGER NOT NULL
+          ${variant.extraColumn ? ", extra TEXT" : ""}
+          ${variant.omitUnique ? "" : ", UNIQUE(guild_id, room_number)"}
+        );
+        INSERT INTO auto_room_number_reservations
+          (reservation_id, guild_id, room_number, created_at, channel_id, state, updated_at) VALUES
+          ('r1', '100', 5, 10, NULL, 'reserved', 11);
+        PRAGMA user_version = 4;
+      `);
+      const before = recoverySnapshot(connection);
+      assert.throws(
+        () => new AutoRoomDatabase({ database: connection }),
+        (error) => error.code === "AUTO_ROOM_SCHEMA_INVALID",
+        variant.name
+      );
+      assert.equal(connection.pragma("user_version", { simple: true }), 4);
+      assert.deepEqual(recoverySnapshot(connection), before);
+      assert.equal(connection.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='auto_room_number_reservations_v4'"
+      ).get(), undefined);
+    } finally {
+      connection.close();
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  }
+});
+
+test("exact hybrid recognizer rejects a noncanonical base-table shape", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "auto-room-hybrid-base-shape-"));
+  const filename = path.join(directory, "rooms.sqlite");
+  createExactHybridFile(filename);
+  const connection = new Database(filename);
+  try {
+    connection.exec("ALTER TABLE guild_room_configs ADD COLUMN unexpected TEXT");
+    const before = recoverySnapshot(connection);
+    assert.throws(
+      () => new AutoRoomDatabase({ database: connection }),
+      (error) => error.code === "AUTO_ROOM_SCHEMA_INVALID"
+    );
+    assert.equal(connection.pragma("user_version", { simple: true }), 4);
+    assert.deepEqual(recoverySnapshot(connection), before);
+  } finally {
+    connection.close();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("exact hybrid with constraint-violating stored data fails integrity validation and rolls back", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "auto-room-hybrid-invalid-row-"));
+  const filename = path.join(directory, "rooms.sqlite");
+  createExactHybridFile(filename);
+  const connection = new Database(filename);
+  try {
+    connection.pragma("ignore_check_constraints = ON");
+    connection.prepare(
+      "UPDATE auto_room_number_reservations SET state = 'invalid' WHERE reservation_id = 'r1'"
+    ).run();
+    connection.pragma("ignore_check_constraints = OFF");
+    const before = recoverySnapshot(connection);
+    assert.throws(
+      () => new AutoRoomDatabase({ database: connection }),
+      (error) => error.code === "AUTO_ROOM_SCHEMA_INVALID"
+    );
+    assert.equal(connection.pragma("user_version", { simple: true }), 4);
+    assert.deepEqual(recoverySnapshot(connection), before);
+  } finally {
+    connection.close();
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("concurrent processes serialize exact hybrid recovery and preserve one table", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "auto-room-hybrid-process-"));
+  const filename = path.join(directory, "rooms.sqlite");
+  createExactHybridFile(filename);
+  const beforeConnection = new Database(filename);
+  const before = recoverySnapshot(beforeConnection);
+  beforeConnection.close();
+  const databaseModule = path.resolve(__dirname, "../../src/infrastructure/database/AutoRoomDatabase.js");
+  const childSource = `
+    const AutoRoomDatabase = require(process.env.DB_MODULE);
+    const database = new AutoRoomDatabase({ filename: process.env.DB_FILE });
+    database.close();
+  `;
+  try {
+    const results = await Promise.all(Array.from({ length: 4 }, () => new Promise((resolve) => {
+      const child = spawn(process.execPath, ["-e", childSource], {
+        cwd: path.resolve(__dirname, "../.."),
+        env: { ...process.env, DB_MODULE: databaseModule, DB_FILE: filename },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("close", (code) => resolve({ code, stderr }));
+    })));
+    assert.deepEqual(results.map((result) => result.code), [0, 0, 0, 0], results.map((result) => result.stderr).join("\n"));
+    const recovered = new AutoRoomDatabase({ filename });
+    try {
+      const after = recoverySnapshot(recovered.connection);
+      assert.equal(recovered.connection.pragma("user_version", { simple: true }), 5);
+      assert.deepEqual(after.rooms, before.rooms);
+      assert.deepEqual(after.grants, before.grants);
+      assert.deepEqual(after.reservations, before.reservations);
+      assert.equal(after.reservationSql, before.reservationSql);
+      assert.equal(after.reservationRootPage, before.reservationRootPage);
+      assert.equal(recovered.connection.prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='auto_room_number_reservations'"
+      ).get().count, 1);
+    } finally { recovered.close(); }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
 test("v3 reservation validation rejects wrong declared column affinities without mutation", () => {
   const variants = [
     { column: "reservation_id", types: ["BLOB", "TEXT", "INTEGER", "INTEGER"] },
