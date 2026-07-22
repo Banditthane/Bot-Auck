@@ -1,14 +1,40 @@
 require("module-alias/register");
 
-const Bootstrap = require("@bootstrap/Bootstrap");
+const {
+  createStartupErrorPayload,
+  formatStartupFailure,
+} = require("@shared/errors/StartupErrorSanitizer");
 
-async function startShard() {
-  const app = await Bootstrap.initialize();
+async function startShard({ initialize } = {}) {
+  const initializeApp = initialize || (() => require("@bootstrap/Bootstrap").initialize());
+  const app = await initializeApp();
   await app.start();
+  return app;
 }
 
-startShard().catch((error) => {
-  const errorCode = error?.code ?? error?.cause?.code ?? "UNKNOWN";
-  console.error(`[Shard] Startup failed (${errorCode}).`);
-  process.exitCode = 1;
-});
+function reportShardFailure(error, { processRef = process, logger = console } = {}) {
+  const payload = createStartupErrorPayload(error, { phase: "bootstrap" });
+  logger.error(formatStartupFailure("[Shard]", payload));
+  if (typeof processRef.send === "function") {
+    try {
+      processRef.send(payload);
+    } catch {
+      // A closed IPC channel must not replace or expose the root failure.
+    }
+  }
+  processRef.exitCode = 1;
+  return payload;
+}
+
+async function main(dependencies = {}) {
+  try {
+    return await startShard(dependencies);
+  } catch (error) {
+    reportShardFailure(error, dependencies);
+    return null;
+  }
+}
+
+if (require.main === module) void main();
+
+module.exports = { startShard, reportShardFailure, main };

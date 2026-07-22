@@ -1,80 +1,80 @@
-/* ======================================================
-โหลดค่า ENV จากไฟล์ .env
-====================================================== */
-require("dotenv").config();
-
-/* ======================================================
-Discord.js Imports
-====================================================== */
 const path = require("path");
-const { ShardingManager } = require("discord.js");
+const {
+  MAX_SHARD_COUNT,
+  MESSAGES,
+  sanitizeStartupError,
+  sanitizeStartupErrorPayload,
+  formatStartupFailure,
+} = require("./shared/errors/StartupErrorSanitizer");
 
-/* ======================================================
-Validate ENV
-====================================================== */
-const TOKEN = process.env.TOKEN;
-
-// ? Check TOKEN
-if (!TOKEN) {
-  throw new Error("❌ ระบบหา TOKEN ไม่เจอ");
+function invalidShardCount() {
+  return Object.assign(new Error(MESSAGES.SHARD_COUNT_INVALID), { code: "SHARD_COUNT_INVALID" });
 }
 
-/* ======================================================
-Sharding Manager
-====================================================== */
-const manager = new ShardingManager(path.join(__dirname, "Shard.js"), {
-  token: TOKEN,
-  totalShards: "auto", //คำนวณจำนวน shard อัตโนมัติ
-  respawn: true, //รีสตาร์ท shard อัตโนมัติถ้าล่ม
-});
-
-/* ======================================================
-Logging
-====================================================== */
-// เมื่อ shard ถูกสร้าง
-manager.on("shardCreate", (shard) => {
-  console.log(`[ShardManager] Spawned shard ${shard.id}`);
-});
-
-/* ======================================================
-Start All Shards
-====================================================== */
-function findErrorCode(error) {
-  let currentError = error;
-
-  while (currentError) {
-    if (currentError.code) {
-      return currentError.code;
-    }
-
-    currentError = currentError.cause;
-  }
-
-  return "UNKNOWN";
+function parseShardCount(value) {
+  if (value === undefined || value === null) return 1;
+  if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) throw invalidShardCount();
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count > MAX_SHARD_COUNT) throw invalidShardCount();
+  return count;
 }
 
-function describeStartupError(error) {
-  const errorCode = findErrorCode(error);
-  const status = error?.status ?? error?.response?.status;
-
-  if (errorCode === "UND_ERR_CONNECT_TIMEOUT") {
-    return `[ShardManager] Discord connection timed out (${errorCode}). Check DNS, firewall, VPN, or proxy access to discord.com:443.`;
-  }
-
-  if (status === 401 || errorCode === 401) {
-    return "[ShardManager] Discord rejected the bot credentials (HTTP 401). Check TOKEN configuration.";
-  }
-
-  return `[ShardManager] Startup failed (${errorCode}). Check the error details and runtime configuration.`;
+function validateToken(token) {
+  if (!token) throw new Error("Bot TOKEN is required.");
+  return token;
 }
 
-async function start() {
+function createManager({ token, shardCount, Manager = require("discord.js").ShardingManager,
+  shardFile = path.join(__dirname, "Shard.js") } = {}) {
+  return new Manager(shardFile, { token: validateToken(token), totalShards: shardCount, respawn: true });
+}
+
+function attachShardDiagnostics(manager, { logger = console, failures = new Map() } = {}) {
+  manager.on("shardCreate", (shard) => {
+    logger.log(`[ShardManager] Spawned shard ${shard.id}`);
+    shard.on("message", (message) => {
+      const failure = sanitizeStartupErrorPayload(message);
+      if (failure) failures.set(shard.id, failure);
+    });
+  });
+  return failures;
+}
+
+function latestFailure(failures) {
+  if (!(failures instanceof Map) || failures.size === 0) return null;
+  return Array.from(failures.values()).at(-1) || null;
+}
+
+function describeManagerFailure(error, failures = new Map()) {
+  const downstream = sanitizeStartupError(error, { phase: "shard-manager" });
+  const root = latestFailure(failures);
+  if (root && downstream.code === "SHARDING_READY_TIMEOUT") {
+    return `${formatStartupFailure("[ShardManager] Root cause:", root)} ` +
+      `Downstream failure (${downstream.code}): ${downstream.message}`;
+  }
+  if (downstream.code === "UND_ERR_CONNECT_TIMEOUT") {
+    return `${formatStartupFailure("[ShardManager]", downstream)} ` +
+      "Check DNS, firewall, VPN, or proxy access to discord.com:443.";
+  }
+  return formatStartupFailure("[ShardManager]", downstream);
+}
+
+async function main({ env = process.env, configureEnv = () => require("dotenv").config(), Manager,
+  logger = console, processRef = process, shardFile } = {}) {
+  const failures = new Map();
   try {
+    configureEnv();
+    const manager = createManager({ token: env.TOKEN, shardCount: parseShardCount(env.SHARD_COUNT), Manager, shardFile });
+    attachShardDiagnostics(manager, { logger, failures });
     await manager.spawn();
+    return manager;
   } catch (error) {
-    console.error(describeStartupError(error));
-    process.exitCode = 1;
+    logger.error(describeManagerFailure(error, failures));
+    processRef.exitCode = 1;
+    return null;
   }
 }
 
-start();
+if (require.main === module) void main();
+
+module.exports = { parseShardCount, validateToken, createManager, attachShardDiagnostics, describeManagerFailure, main };
