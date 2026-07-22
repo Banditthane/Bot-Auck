@@ -1,0 +1,128 @@
+Folder PATH listing for volume [?????] KEEP
+Volume serial number is 0A51-66B1
+H:\4UCK-EFARIS (HOST)\SRC
+|   Index.back
+|   Index.js
+|   Shard.js
+|   
++---application
+|   +---dto
+|   +---events
+|   +---mappers
+|   +---repositories
+|   |   \---contracts
+|   \---services
+|           MemberService.js
+|           oauth.service.js
+|           ping.service.js
+|           server.service.js
+|           verification.service.js
+|           
++---auck
++---config
+|   \---roles
++---core
+|   |   eventRegistry.key
+|   |   _README.md
+|   |   
+|   +---bootstrap
+|   |       Bootstrap.js
+|   |       
+|   +---di
+|   |       Container.js
+|   |       
+|   +---pipeline
+|   |       InteractionRouter.js
+|   |       MiddlewarePipeline.js
+|   |       
+|   +---registry
+|   |       CommandRegistry.js
+|   |       
+|   \---runtime
+|           Bot.js
+|           EventLoader.js
+|           
++---domain
+|   +---entities
+|   +---errors
+|   +---policies
+|   \---valueObjects
++---infrastructure
+|   |   ShutdownManager.js
+|   |   
+|   +---cache
+|   +---config
+|   |       DatabaseConfig.js
+|   |       DiscordConfig.js
+|   |       Env.js
+|   |       Index.js
+|   |       LoggerConfig.js
+|   |       MonitoringConfig.js
+|   |       
+|   +---cronJob
+|   +---database
+|   |   |   sqlite.key
+|   |   |   
+|   |   \---repositories
+|   +---eventbus
+|   +---logging
+|   |       DevLogger.js
+|   |       LogContext.js
+|   |       Logger.js
+|   |       LogLevels.js
+|   |       
+|   +---monitoring
+|   +---oauth
+|   |   \---routes
+|   \---providers
++---interfaces
+|   +---discord
+|   |   +---adapters
+|   |   +---commands
+|   |   |   +---admin
+|   |   |   +---misc
+|   |   |   +---moderation
+|   |   |   |   +---ban
+|   |   |   |   +---clear
+|   |   |   |   +---kick
+|   |   |   |   +---mute
+|   |   |   |   \---warn
+|   |   |   \---utility
+|   |   |       +---avatar
+|   |   |       +---help
+|   |   |       +---invite
+|   |   |       +---ping
+|   |   |       |       command.js
+|   |   |       |       handler.js
+|   |   |       |       
+|   |   |       +---serverinfo
+|   |   |       \---userinfo
+|   |   +---events
+|   |   |   +---client
+|   |   |   |       interactionCreate.js
+|   |   |   |       ready.js
+|   |   |   |       
+|   |   |   +---guild
+|   |   |   |       guildCreate.key
+|   |   |   |       
+|   |   |   +---member
+|   |   |   |       guildMemberAdd.key
+|   |   |   |       
+|   |   |   \---message
+|   |   \---middleware
+|   \---http
+|       +---controllers
+|       +---middleware
+|       \---routes
++---scripts
+|       000.md
+|       dev-diagnostic.js
+|       testLogger.js
+|       
++---shared
+|   +---constants
+|   +---errors
+|   \---helpers
+|           requestId.js
+|           
+\---types

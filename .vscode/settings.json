@@ -1,0 +1,9 @@
+{
+    "java.format.settings.url": "eclipse-formatter.xml",
+    "files.exclude": {
+        "**/node_modules": true,
+        "**/dist": true,
+        "**/build": true,
+        "**/.next": true
+    }
+}

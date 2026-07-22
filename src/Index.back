@@ -1,0 +1,90 @@
+// ======================================================
+// Environment Variables
+// โหลดค่า ENV จากไฟล์ .env
+// ======================================================
+require("dotenv").config();
+
+// ======================================================
+// Discord.js Imports
+// ======================================================
+const { ShardingManager } = require("discord.js");
+
+// ======================================================
+// Node.js Core Modules
+// ======================================================
+const path = require("path");
+
+// ======================================================
+// Config
+// ======================================================
+const TOKEN = process.env.TOKEN;
+
+// ======================================================
+// Validate Environment
+// ตรวจสอบว่ามี TOKEN ใน .env หรือไม่
+// ======================================================
+if (!TOKEN) {
+  console.error("❌ TOKEN missing in .env");
+  process.exit(1);
+}
+
+// ======================================================
+// Sharding Manager
+// Enterprise Infrastructure Layer
+//
+// หน้าที่:
+// - Spawn shards
+// - จัดการ process lifecycle
+// - Auto respawn shard เมื่อ crash
+// - รองรับ horizontal scaling
+// ======================================================
+const manager = new ShardingManager(path.join(__dirname, "shard.js"), {
+  token: TOKEN,
+
+  // Auto calculate shard count
+  totalShards: "auto",
+
+  // Restart shard automatically if crashed
+  respawn: true,
+});
+
+// ======================================================
+// Shard Lifecycle Events
+// ======================================================
+
+// เมื่อ shard ถูกสร้าง
+manager.on("shardCreate", (shard) => {
+  console.log(`[ShardManager] Spawned shard ${shard.id}`);
+});
+
+// ======================================================
+// Start All Shards
+// ======================================================
+manager.spawn();
+
+//
+//
+//
+//
+//
+//
+//
+//
+
+// ======================================================
+
+// require("dotenv").config();
+
+// const { ShardingManager } = require("discord.js");
+// const path = require("path");
+
+// const manager = new ShardingManager(path.join(__dirname, "shard.js"), {
+//   token: process.env.TOKEN,
+//   totalShards: "auto",
+// });
+
+// manager.on("shardCreate", (shard) => {
+//   console.log(`[ShardManager] Launched shard ${shard.id}`);
+// });
+
+// manager.spawn();
