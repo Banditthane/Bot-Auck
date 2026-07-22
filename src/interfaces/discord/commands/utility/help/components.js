@@ -1,0 +1,2 @@
+const PATTERN = /^ma:help:([A-Za-z0-9_-]{8,64}):(home|previous|next|refresh)$/;
+module.exports = { prefix: "ma:help:", parse(customId) { const match = PATTERN.exec(String(customId || "")); return match ? { sessionId: match[1], action: match[2] } : null; }, async execute({ interaction, container }) { const parsed = this.parse(interaction.customId); if (!parsed) return false; await container.resolve("helpComponentAdapter").handle(interaction, parsed); return true; } };

@@ -1,0 +1,2 @@
+const PATTERN = /^ma:autorole:([A-Za-z0-9_-]{8,64}):(confirm|cancel|next|previous)$/;
+module.exports = { prefix: "ma:autorole:", parse(customId) { const match = PATTERN.exec(String(customId || "")); return match ? { sessionId: match[1], action: match[2] } : null; }, async execute({ interaction, container }) { const parsed = this.parse(interaction.customId); if (!parsed) return false; await container.resolve("autoRoleComponentAdapter").handle(interaction, parsed); return true; } };

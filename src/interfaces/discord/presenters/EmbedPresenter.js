@@ -1,0 +1,3 @@
+const { EmbedBuilder } = require("discord.js");
+class EmbedPresenter { embed({ title, description, color = 0x5865f2, fields = [] }) { return new EmbedBuilder().setColor(color).setTitle(String(title).slice(0, 256)).setDescription(String(description || "").slice(0, 4096)).addFields(fields.slice(0, 25).map((field) => ({ name: String(field.name).slice(0, 256), value: String(field.value).slice(0, 1024), inline: Boolean(field.inline) }))); } error(traceId) { return this.embed({ title: "Unable to complete request", description: `Please try again later.${traceId ? ` Reference: ${String(traceId).slice(0, 64)}` : ""}`, color: 0xed4245 }); } }
+module.exports = EmbedPresenter;

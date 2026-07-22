@@ -10,9 +10,10 @@ module.exports = {
     const userId = member?.id;
     if (!guildId || !userId || member.user?.bot) return;
     try {
-      const service = container.resolve("services")?.autoNameService;
-      if (!service) return;
-      await service.assign({ guildId, userId, actorId: null, source: "join", traceId: `join:${guildId}:${userId}`.slice(0, 64) });
+      const services = container.resolve("services");
+      const orchestrator = services?.memberAutomationOrchestrator;
+      if (orchestrator) await orchestrator.handle({ guildId, userId, actorId: null, trigger: "MEMBER_JOIN", source: "join", traceId: `join:${guildId}:${userId}`.slice(0, 64) });
+      else if (services?.autoNameService) await services.autoNameService.assign({ guildId, userId, actorId: null, source: "join", traceId: `join:${guildId}:${userId}`.slice(0, 64) });
     } catch (error) {
       try { container.resolve("logger")?.warn("auto_name_member_add_failed", { guildId, userId, code: safeCode(error) }); } catch (_ignored) {}
     }

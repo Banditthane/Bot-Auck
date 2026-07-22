@@ -1,0 +1,4 @@
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
+const EmbedPresenter = require("./EmbedPresenter");
+class HelpPresenter extends EmbedPresenter { present(result, sessionId = null) { const entry = result.entry; const description = entry ? entry.description : result.categories?.map((category) => `• ${category}`).join("\n") || "No commands available."; const payload = { embeds: [this.embed({ title: entry ? `/${entry.name}` : "Command Help", description })] }; if (sessionId) payload.components = [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`ma:help:${sessionId}:home`).setLabel("Home").setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`ma:help:${sessionId}:refresh`).setLabel("Refresh").setStyle(ButtonStyle.Primary))]; return payload; } }
+module.exports = HelpPresenter;

@@ -1,0 +1,3 @@
+const EmbedPresenter = require("./EmbedPresenter");
+class AutoRolePresenter extends EmbedPresenter { success(message) { return { embeds: [this.embed({ title: "Auto Role", description: message, color: 0x57f287 })] }; } rules(rules = []) { return { embeds: [this.embed({ title: "Auto Role rules", description: rules.length ? rules.map((rule) => `• ${rule.name} (${rule.trigger})`).join("\n").slice(0, 4096) : "No rules configured." })] }; } status(job) { return { embeds: [this.embed({ title: "Auto Role scan", description: job ? `Status: ${String(job.status || "unknown").slice(0, 32)}\nProcessed: ${Number(job.processedMembers || 0)}` : "No scan found." })] }; } }
+module.exports = AutoRolePresenter;
