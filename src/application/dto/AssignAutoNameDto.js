@@ -11,6 +11,7 @@ class AssignAutoNameDto {
     if (!SOURCES.includes(this.source)) throw new AutoNameValidationError("Assignment source is invalid.", CODES.VALIDATION);
     this.dryRun = Boolean(input.dryRun);
     this.missingOnly = Boolean(input.missingOnly);
+    this.force = Boolean(input.force);
     this.traceId = String(input.traceId || "").slice(0, 64);
     Object.freeze(this);
   }

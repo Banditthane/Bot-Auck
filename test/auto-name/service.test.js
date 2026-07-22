@@ -65,11 +65,11 @@ test("assignment allocates once, mutates nickname once, audits, then becomes ide
   assert.equal(fx.calls.audit[0].newNickname, "000001");
 });
 
-test("missing-only scan skips a freshly recognized existing Auto Name", async () => {
+test("missing-only scan uses stored member code even when gateway says no Auto Name", async () => {
   const fx = fixture();
   await fx.service.assign({ ...IDS, source: "repair" });
   fx.gateway.facts.currentNickname = "manually changed";
-  fx.gateway.facts.hasAutoName = true;
+  fx.gateway.facts.hasAutoName = false;
   const result = await fx.service.assign({ ...IDS, source: "scan", missingOnly: true });
   assert.equal(result.code, RESULTS.ALREADY_CORRECT);
   assert.equal(fx.calls.nickname.length, 1);
@@ -139,8 +139,135 @@ test("every resumed scan batch revalidates actor and coordinates bounded work th
   assert.deepEqual(queueCalls.map(([name]) => name), ["heartbeat", "progress", "complete"]);
 });
 
+test("getConfig and updateTemplate authorize fresh actor facts inside the service", async () => {
+  const fx = fixture();
+  const read = await fx.service.getConfig({ guildId: IDS.guildId, actorId: IDS.actorId });
+  assert.equal(read.code, RESULTS.CONFIG_READ);
+  const updated = await fx.service.updateTemplate({
+    guildId: IDS.guildId, actorId: IDS.actorId, template: "member-{code}", traceId: "trace",
+  });
+  assert.equal(updated.code, RESULTS.TEMPLATE_UPDATED);
+  assert.equal(updated.config.template.value, "member-{code}");
+  assert.equal(updated.config.requiredRoleId, IDS.roleId);
+  fx.gateway.facts.actorHasManageNicknames = false;
+  await assert.rejects(
+    fx.service.getConfig({ guildId: IDS.guildId, actorId: IDS.actorId }),
+    (error) => error.code === CODES.FORBIDDEN
+  );
+  await assert.rejects(
+    fx.service.updateTemplate({ guildId: IDS.guildId, actorId: IDS.actorId, template: "{code}" }),
+    (error) => error.code === CODES.FORBIDDEN
+  );
+});
+
+test("preview authorizes actor and returns labelled sample-code state without allocation", async () => {
+  const fx = fixture();
+  const preview = await fx.service.preview({ guildId: IDS.guildId, userId: IDS.userId, actorId: IDS.actorId });
+  assert.equal(preview.code, RESULTS.PREVIEW_RENDERED);
+  assert.equal(preview.nickname, "000001");
+  assert.equal(preview.sampleCode, true);
+  assert.equal(fx.calls.allocate, 0);
+  fx.gateway.facts.actorHasManageNicknames = false;
+  await assert.rejects(
+    fx.service.preview({ guildId: IDS.guildId, userId: IDS.userId, actorId: IDS.actorId }),
+    (error) => error.code === CODES.FORBIDDEN
+  );
+});
+
+test("scan status authorizes fresh actor before reading queue", async () => {
+  const fx = fixture();
+  const queueCalls = [];
+  const queue = { async getStatus(input) { queueCalls.push(input); return { id: "job" }; } };
+  const scans = new AutoNameScanService({
+    scanQueue: queue, nicknameGateway: fx.gateway, autoNameService: fx.service,
+    configRepository: fx.configRepository,
+  });
+  assert.deepEqual(await scans.getStatus({ guildId: IDS.guildId, actorId: IDS.actorId }), { id: "job" });
+  assert.equal(queueCalls.length, 1);
+  fx.gateway.facts.actorHasManageNicknames = false;
+  await assert.rejects(
+    scans.getStatus({ guildId: IDS.guildId, actorId: IDS.actorId }),
+    (error) => error.code === CODES.FORBIDDEN
+  );
+  assert.equal(queueCalls.length, 1);
+});
+
+test("scan prefilters persisted required role and forwards force to assignment", async () => {
+  const fx = fixture();
+  const assignments = [];
+  fx.gateway.listMembersPage = async () => ({
+    members: [
+      { userId: IDS.userId, roleIds: [IDS.roleId] },
+      { userId: "10000000000000005", roleIds: [] },
+    ],
+    nextCursor: null,
+  });
+  const queue = { async heartbeat() {}, async saveProgress() {}, async complete() {} };
+  const scans = new AutoNameScanService({
+    scanQueue: queue, nicknameGateway: fx.gateway,
+    autoNameService: { async assign(input) { assignments.push(input); return { code: RESULTS.ALREADY_CORRECT }; } },
+    configRepository: fx.configRepository,
+  });
+  const result = await scans.processLeasedBatch({
+    job: { id: "job", guildId: IDS.guildId, createdBy: IDS.actorId, missingOnly: false,
+      force: true, dryRun: false, subsetRoleId: null, cursorUserId: null },
+    workerId: "worker",
+  });
+  assert.equal(assignments.length, 1);
+  assert.equal(assignments[0].force, true);
+  assert.equal(result.totals.scannedCount, 2);
+  assert.equal(result.totals.skippedCount, 2);
+  assert.equal(result.totals.failedCount, 0);
+});
+
+test("scan propagates retryable member errors but accounts permanent errors", async () => {
+  const fx = fixture();
+  const queueCalls = [];
+  const queue = {
+    async heartbeat() { queueCalls.push("heartbeat"); },
+    async saveProgress() { queueCalls.push("progress"); },
+    async complete() { queueCalls.push("complete"); },
+  };
+  const job = { id: "job", guildId: IDS.guildId, createdBy: IDS.actorId, missingOnly: false,
+    force: false, dryRun: false, subsetRoleId: null, cursorUserId: null };
+  const retrying = new AutoNameScanService({
+    scanQueue: queue, nicknameGateway: fx.gateway,
+    autoNameService: { async assign() { throw Object.assign(new Error("rate limited"), { code: CODES.RATE_LIMIT, retryable: true }); } },
+    configRepository: fx.configRepository,
+  });
+  await assert.rejects(
+    retrying.processLeasedBatch({ job, workerId: "worker" }),
+    (error) => error.code === CODES.RATE_LIMIT
+  );
+  assert.deepEqual(queueCalls, []);
+
+  const permanent = new AutoNameScanService({
+    scanQueue: queue, nicknameGateway: fx.gateway,
+    autoNameService: { async assign() { throw Object.assign(new Error("permanent"), { code: CODES.PERMANENT }); } },
+    configRepository: fx.configRepository,
+  });
+  const result = await permanent.processLeasedBatch({ job, workerId: "worker" });
+  assert.equal(result.totals.failedCount, 1);
+  assert.deepEqual(queueCalls, ["heartbeat", "progress", "complete"]);
+});
+test("scan counts policy-ineligible members as skipped instead of failed", async () => {
+  const fx = fixture();
+  const queue = { async heartbeat() {}, async saveProgress() {}, async complete() {} };
+  const scans = new AutoNameScanService({
+    scanQueue: queue, nicknameGateway: fx.gateway,
+    autoNameService: { async assign() { throw Object.assign(new Error("ineligible"), { code: CODES.INELIGIBLE }); } },
+    configRepository: fx.configRepository,
+  });
+  const result = await scans.processLeasedBatch({
+    job: { id: "job", guildId: IDS.guildId, createdBy: IDS.actorId, missingOnly: false,
+      force: false, dryRun: false, subsetRoleId: null, cursorUserId: null },
+    workerId: "worker",
+  });
+  assert.equal(result.totals.skippedCount, 1);
+  assert.equal(result.totals.failedCount, 0);
+});
 test("service contracts expose stable method lists and conservative limits", () => {
-  assert.deepEqual(AutoNameService.AUTO_NAME_SERVICE_METHODS, ["configure", "setEnabled", "assign", "preview"]);
+  assert.deepEqual(AutoNameService.AUTO_NAME_SERVICE_METHODS, ["configure", "getConfig", "updateTemplate", "setEnabled", "assign", "preview"]);
   assert.deepEqual(AutoNameScanService.AUTO_NAME_SCAN_SERVICE_METHODS, ["enqueue", "getStatus", "processLeasedBatch"]);
   assert.equal(AutoNameScanService.DEFAULT_BATCH_SIZE, 25);
   assert.equal(AutoNameScanService.DEFAULT_CONCURRENCY, 2);

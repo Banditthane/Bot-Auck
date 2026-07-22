@@ -1,6 +1,7 @@
 const AutoNameConfig = require("../../domain/entities/AutoNameConfig");
 const MemberCode = require("../../domain/entities/MemberCode");
 const ConfigureAutoNameDto = require("../dto/ConfigureAutoNameDto");
+const { assertSnowflake } = ConfigureAutoNameDto;
 const AssignAutoNameDto = require("../dto/AssignAutoNameDto");
 const { assertActorAuthorized, assertMemberEligible } = require("../../domain/policies/AutoNamePolicy");
 const {
@@ -51,6 +52,31 @@ class AutoNameService {
     return { ok: true, code: RESULTS.CONFIGURED, config };
   }
 
+  async getConfig({ guildId, actorId }) {
+    assertSnowflake(guildId, "guildId");
+    assertSnowflake(actorId, "actorId");
+    const config = await this._config(guildId);
+    await this._authorizeActor(config, actorId);
+    return { ok: true, code: RESULTS.CONFIG_READ, config };
+  }
+
+  async updateTemplate({ guildId, actorId, template, traceId }) {
+    assertSnowflake(guildId, "guildId");
+    assertSnowflake(actorId, "actorId");
+    const current = await this._config(guildId);
+    await this._authorizeActor(current, actorId);
+    const validated = this.templates.validate(template);
+    const config = new AutoNameConfig({
+      guildId: current.guildId, enabled: current.enabled, requiredRoleId: current.requiredRoleId,
+      template: validated, codeLength: current.codeLength, createdAt: current.createdAt,
+      updatedAt: this.clock.now(),
+    });
+    await this.configs.upsert(config);
+    this.telemetry.info("auto_name_template_updated", {
+      guildId, actorId, traceId: String(traceId || "").slice(0, 64), outcome: RESULTS.TEMPLATE_UPDATED,
+    });
+    return { ok: true, code: RESULTS.TEMPLATE_UPDATED, config };
+  }
   async setEnabled({ guildId, actorId, enabled, traceId }) {
     const current = await this._config(guildId);
     const dto = new ConfigureAutoNameDto({
@@ -73,10 +99,10 @@ class AutoNameService {
       requiredRoleId: config.requiredRoleId,
     });
     assertMemberEligible(facts, { actorRequired: Boolean(dto.actorId) });
-    if (dto.missingOnly && facts.hasAutoName) {
+    const existing = await this.codes.findByGuildUser(dto.guildId, dto.userId);
+    if (dto.missingOnly && existing) {
       return { ok: true, code: RESULTS.ALREADY_CORRECT, guildId: dto.guildId, userId: dto.userId };
     }
-    const existing = await this.codes.findByGuildUser(dto.guildId, dto.userId);
     if (dto.dryRun && !existing) {
       return { ok: true, code: RESULTS.DRY_RUN_WOULD_ALLOCATE, guildId: dto.guildId, userId: dto.userId };
     }
@@ -114,16 +140,29 @@ class AutoNameService {
     return { ok: true, code: RESULTS.ASSIGNED, guildId: dto.guildId, userId: dto.userId, auditWarning };
   }
 
-  async preview({ guildId, userId }) {
+  async preview({ guildId, userId, actorId }) {
+    assertSnowflake(guildId, "guildId");
+    assertSnowflake(userId, "userId");
+    assertSnowflake(actorId, "actorId");
     const config = await this._config(guildId);
-    const facts = await this.gateway.getMemberFacts({ guildId, userId, actorId: null, requiredRoleId: config.requiredRoleId });
+    const facts = await this.gateway.getMemberFacts({ guildId, userId, actorId, requiredRoleId: config.requiredRoleId });
+    assertActorAuthorized(facts);
     const existing = await this.codes.findByGuildUser(guildId, userId);
-    return this.templates.render({
+    const nickname = this.templates.render({
       template: config.template.value || config.template, memberNumber: existing?.memberNumber?.value || existing?.memberNumber || 1,
       codeLength: config.codeLength, username: facts.username, displayName: facts.displayName, role: facts.roleName,
     });
+    return { ok: true, code: RESULTS.PREVIEW_RENDERED, nickname, sampleCode: !existing };
   }
 
+  async _authorizeActor(config, actorId) {
+    const facts = await this.gateway.getMemberFacts({
+      guildId: config.guildId, userId: actorId, actorId,
+      requiredRoleId: config.requiredRoleId,
+    });
+    assertActorAuthorized(facts);
+    return facts;
+  }
   async _config(guildId) {
     const found = await this.configs.findByGuild(guildId);
     if (!found) throw new AutoNameStateError("Auto Name is not configured.", CODES.CONFIG_NOT_FOUND);
@@ -132,4 +171,4 @@ class AutoNameService {
 }
 
 module.exports = AutoNameService;
-module.exports.AUTO_NAME_SERVICE_METHODS = Object.freeze(["configure", "setEnabled", "assign", "preview"]);
+module.exports.AUTO_NAME_SERVICE_METHODS = Object.freeze(["configure", "getConfig", "updateTemplate", "setEnabled", "assign", "preview"]);

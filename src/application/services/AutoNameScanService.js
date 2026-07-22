@@ -26,7 +26,15 @@ class AutoNameScanService {
     return { ok: true, code: RESULTS.SCAN_QUEUED, job };
   }
 
-  getStatus({ guildId, jobId = null }) { return this.queue.getStatus({ guildId, jobId }); }
+  async getStatus({ guildId, actorId, jobId = null }) {
+    const config = await this.configs.findByGuild(guildId);
+    if (!config) throw new AutoNameStateError("Auto Name is not configured.", CODES.CONFIG_NOT_FOUND);
+    const actorFacts = await this.gateway.getMemberFacts({
+      guildId, userId: actorId, actorId, requiredRoleId: config.requiredRoleId,
+    });
+    assertActorAuthorized(actorFacts);
+    return this.queue.getStatus({ guildId, jobId });
+  }
 
   async processLeasedBatch({ job, workerId, batchSize = DEFAULT_BATCH_SIZE, concurrency = DEFAULT_CONCURRENCY }) {
     if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 100) throw new RangeError("batchSize must be 1..100.");
@@ -41,12 +49,21 @@ class AutoNameScanService {
     for (let offset = 0; offset < members.length; offset += concurrency) {
       const chunk = members.slice(offset, offset + concurrency);
       const results = await Promise.all(chunk.map(async (member) => {
-        if (job.subsetRoleId && !member.roleIds?.includes(job.subsetRoleId)) return "skipped";
+        if (!member.roleIds?.includes(config.requiredRoleId)) return "skipped";
+        if (job.subsetRoleId && !member.roleIds.includes(job.subsetRoleId)) return "skipped";
         try {
-          const result = await this.autoNames.assign({ guildId: job.guildId, userId: member.userId, actorId: job.createdBy, source: "scan", dryRun: job.dryRun, missingOnly: job.missingOnly, traceId: job.traceId });
+          const result = await this.autoNames.assign({
+            guildId: job.guildId, userId: member.userId, actorId: job.createdBy,
+            source: "scan", dryRun: job.dryRun, missingOnly: job.missingOnly,
+            force: job.force, traceId: job.traceId,
+          });
           totals.eligibleCount += 1;
           return result.code === RESULTS.ASSIGNED ? "renamed" : "skipped";
-        } catch (_error) { return "failed"; }
+        } catch (error) {
+          if (isRetryableError(error)) throw error;
+          if (isSkippableMemberError(error)) return "skipped";
+          return "failed";
+        }
       }));
       for (const result of results) totals[`${result}Count`] += 1;
       await this.queue.heartbeat({ jobId: job.id, workerId, now: this.clock.now() });
@@ -58,7 +75,22 @@ class AutoNameScanService {
   }
 }
 
+const RETRYABLE_ERROR_CODES = new Set([
+  CODES.RATE_LIMIT, CODES.TRANSIENT, CODES.DATABASE_BUSY,
+  "SQLITE_BUSY", "SQLITE_LOCKED", "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+function isRetryableError(error) {
+  return error?.retryable === true || RETRYABLE_ERROR_CODES.has(error?.code);
+}
+
+function isSkippableMemberError(error) {
+  return error?.code === CODES.INELIGIBLE || error?.code === CODES.UNMANAGEABLE;
+}
 module.exports = AutoNameScanService;
 module.exports.DEFAULT_BATCH_SIZE = DEFAULT_BATCH_SIZE;
 module.exports.DEFAULT_CONCURRENCY = DEFAULT_CONCURRENCY;
+module.exports.RETRYABLE_ERROR_CODES = RETRYABLE_ERROR_CODES;
+module.exports.isRetryableError = isRetryableError;
+module.exports.isSkippableMemberError = isSkippableMemberError;
 module.exports.AUTO_NAME_SCAN_SERVICE_METHODS = Object.freeze(["enqueue", "getStatus", "processLeasedBatch"]);
