@@ -1,0 +1,2 @@
+class MemberRoleGateway { getActorFacts() { throw new Error("getActorFacts() is not implemented."); } getMemberFacts() { throw new Error("getMemberFacts() is not implemented."); } listMembersPage() { throw new Error("listMembersPage() is not implemented."); } addRole() { throw new Error("addRole() is not implemented."); } removeRole() { throw new Error("removeRole() is not implemented."); } refetchMember() { throw new Error("refetchMember() is not implemented."); } }
+module.exports = MemberRoleGateway;

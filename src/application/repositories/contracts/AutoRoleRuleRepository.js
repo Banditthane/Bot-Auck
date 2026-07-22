@@ -1,0 +1,2 @@
+class AutoRoleRuleRepository { create() { throw new Error("create() is not implemented."); } update() { throw new Error("update() is not implemented."); } findById() { throw new Error("findById() is not implemented."); } listByGuildTrigger() { throw new Error("listByGuildTrigger() is not implemented."); } listByGuild() { throw new Error("listByGuild() is not implemented."); } softDelete() { throw new Error("softDelete() is not implemented."); } }
+module.exports = AutoRoleRuleRepository;

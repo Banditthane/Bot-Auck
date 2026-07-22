@@ -1,0 +1,15 @@
+const AutoRoleRule = require("../../domain/entities/AutoRoleRule");
+const CreateAutoRoleRuleDto = require("../dto/CreateAutoRoleRuleDto");
+const UpdateAutoRoleRuleDto = require("../dto/UpdateAutoRoleRuleDto");
+const { assertSnowflake } = CreateAutoRoleRuleDto;
+const { AUTO_ROLE_ERROR_CODES: CODES, AUTO_ROLE_RESULT_CODES: RESULTS, AutoRoleAuthorizationError, AutoRoleStateError } = require("../../domain/errors/AutoRoleErrors");
+class AutoRoleRuleService {
+  constructor({ ruleRepository, memberRoleGateway, clock = { now: () => Date.now() } }) { if (!ruleRepository || !memberRoleGateway) throw new TypeError("ruleRepository and memberRoleGateway are required."); this.rules = ruleRepository; this.gateway = memberRoleGateway; this.clock = clock; }
+  async create(input) { const dto = input instanceof CreateAutoRoleRuleDto ? input : new CreateAutoRoleRuleDto(input); await this._authorize(dto.guildId, dto.actorId); const now = this.clock.now(); const rule = new AutoRoleRule({ ...dto, createdBy: dto.actorId, createdAt: now, updatedAt: now }); await this.rules.create(rule); return { ok: true, code: RESULTS.RULE_CREATED, rule }; }
+  async update(input) { const dto = input instanceof UpdateAutoRoleRuleDto ? input : new UpdateAutoRoleRuleDto(input); await this._authorize(dto.guildId, dto.actorId); const previous = await this.rules.findById(dto.guildId, dto.ruleId); if (!previous) throw new AutoRoleStateError("Auto Role rule was not found.", CODES.RULE_NOT_FOUND); const rule = new AutoRoleRule({ ...previous, ...dto.changes, guildId: dto.guildId, ruleId: previous.ruleId, createdBy: previous.createdBy, createdAt: previous.createdAt, updatedAt: this.clock.now() }); await this.rules.update(rule); return { ok: true, code: RESULTS.RULE_UPDATED, rule }; }
+  async delete({ guildId, actorId, ruleId }) { assertSnowflake(guildId, "guildId"); assertSnowflake(actorId, "actorId"); await this._authorize(guildId, actorId); if (!await this.rules.findById(guildId, ruleId)) throw new AutoRoleStateError("Auto Role rule was not found.", CODES.RULE_NOT_FOUND); await this.rules.softDelete(guildId, ruleId, this.clock.now()); return { ok: true, code: RESULTS.RULE_DELETED, ruleId }; }
+  async get({ guildId, actorId, ruleId }) { assertSnowflake(guildId, "guildId"); assertSnowflake(actorId, "actorId"); await this._authorize(guildId, actorId); const rule = await this.rules.findById(guildId, ruleId); if (!rule) throw new AutoRoleStateError("Auto Role rule was not found.", CODES.RULE_NOT_FOUND); return { ok: true, code: RESULTS.RULE_READ, rule }; }
+  async list({ guildId, actorId }) { assertSnowflake(guildId, "guildId"); assertSnowflake(actorId, "actorId"); await this._authorize(guildId, actorId); return { ok: true, code: RESULTS.RULE_READ, rules: await this.rules.listByGuild(guildId) }; }
+  async _authorize(guildId, actorId) { const facts = await this.gateway.getActorFacts({ guildId, actorId }); if (!facts?.actorIsOwner && !facts?.actorIsAdministrator) throw new AutoRoleAuthorizationError("Guild owner or Administrator is required.", CODES.FORBIDDEN); }
+}
+module.exports = AutoRoleRuleService;
