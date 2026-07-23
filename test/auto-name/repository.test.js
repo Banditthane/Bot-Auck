@@ -25,14 +25,20 @@ function config(overrides = {}) {
     codeLength: 6, createdAt: 100, updatedAt: 100, ...overrides };
 }
 
-test("schema v1 creates only dedicated Auto Name tables and exact active index", (t) => {
+test("schema v2 creates Auto Name plus Member Automation tables and exact active indexes", (t) => {
   const { database } = fixture(t);
-  assert.equal(database.connection.pragma("user_version", { simple: true }), 1);
+  assert.equal(database.connection.pragma("user_version", { simple: true }), 2);
   const tables = database.connection.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((row) => row.name);
-  assert.deepEqual(tables, ["auto_name_audit_logs", "auto_name_scan_jobs", "guild_auto_name_configs", "guild_member_codes", "guild_member_counters"]);
+  assert.deepEqual(tables, [
+    "auto_name_audit_logs", "auto_name_scan_jobs", "auto_role_audit_logs", "auto_role_configs", "auto_role_rules",
+    "guild_auto_name_configs", "guild_member_codes", "guild_member_counters", "interaction_sessions",
+    "member_automation_jobs", "member_automation_operations",
+  ]);
   assert.equal(tables.some((name) => name.includes("auto_room")), false);
   const index = database.connection.pragma("index_list(auto_name_scan_jobs)").find((entry) => entry.name === "auto_name_one_active_scan_per_guild");
   assert.equal(index.unique, 1); assert.equal(index.partial, 1);
+  const automationIndex = database.connection.pragma("index_list(member_automation_jobs)").find((entry) => entry.name === "member_automation_one_active_job");
+  assert.equal(automationIndex.unique, 1); assert.equal(automationIndex.partial, 1);
 });
 
 test("malformed or unsupported schemas fail closed without stamping", () => {

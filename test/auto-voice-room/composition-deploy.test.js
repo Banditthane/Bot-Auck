@@ -83,12 +83,12 @@ test("guild deployment requires confirmation and replaces with the full local co
   const result = await deployCommands({ env, rest, confirmReplacement: true });
 
   assert.deepEqual(result, {
-    count: 3,
+    count: 11,
     scope: "guild",
-    commandNames: ["ping", "room", "room-setup"],
+    commandNames: ["ping", "help", "room", "room-setup", "autoname", "autorole", "ban", "kick", "unban", "timeout", "untimeout"],
   });
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].options.body.map((command) => command.name), ["ping", "room", "room-setup"]);
+  assert.deepEqual(calls[0].options.body.map((command) => command.name), result.commandNames);
   const submittedRoom = calls[0].options.body.find((command) => command.name === "room");
   assert.equal(submittedRoom.options.filter((option) => option.name === "help").length, 1);
   assert.equal(calls[0].route, "/applications/10000000000000000/guilds/20000000000000000/commands");
@@ -97,16 +97,15 @@ test("guild deployment requires confirmation and replaces with the full local co
 test("Bootstrap creates the client before the Discord gateway and registers each command once", () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../../src/core/bootstrap/Bootstrap.js"), "utf8");
   assert.ok(source.indexOf("createBot(container)") < source.indexOf("new DiscordRoomGateway"));
-  for (const name of ["pingCommand", "roomCommand", "roomSetupCommand"]) {
-    const matches = source.match(new RegExp(`commandRegistry\\.register\\(${name}\\.data\\.name`, "g")) || [];
-    assert.equal(matches.length, 1, name);
-  }
+  assert.match(source, /commandManifest/);
+  assert.equal((source.match(/commandRegistry\.register\(descriptor\.name, descriptor\.command, descriptor/g) || []).length, 1);
 });
 
 test("owned production files do not use deprecated ephemeral booleans", () => {
   const files = [
     "src/interfaces/discord/commands/room/handler.js",
     "src/interfaces/discord/commands/admin/room-setup/handler.js",
+    "src/interfaces/discord/commands/moderation/shared.js",
   ];
   for (const file of files) {
     const source = fs.readFileSync(path.resolve(__dirname, "../..", file), "utf8");

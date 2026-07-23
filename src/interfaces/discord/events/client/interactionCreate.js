@@ -9,10 +9,12 @@ module.exports = {
   async execute({ client, container, args }) {
     const interaction = args[0];
 
-    if (!interaction.isChatInputCommand()) return;
+    if (!interaction.isChatInputCommand() && !interaction.isMessageComponent?.()) return;
 
     const logger = container.resolve("logger");
-    const router = container.resolve("interactionRouter");
+    const router = interaction.isChatInputCommand()
+      ? container.resolve("interactionRouter")
+      : container.resolve("componentRouter");
 
     const shardId = client.shard?.ids?.[0] ?? 0;
     const requestId = createRequestId();
@@ -24,14 +26,14 @@ module.exports = {
         shardId,
         guildId: interaction.guildId,
         userId: interaction.user?.id,
-        command: interaction.commandName
+          command: interaction.commandName || interaction.customId
       },
       async () => {
-        logger.info(`Command received: ${interaction.commandName}`);
+        logger.info(`Interaction received: ${interaction.commandName || interaction.customId}`);
         try {
           await router.route(interaction);
         } catch (error) {
-          logger.error(`Command failed: ${interaction.commandName}`);
+          logger.error(`Interaction failed: ${interaction.commandName || interaction.customId}`);
           console.error(error);
         }
       }

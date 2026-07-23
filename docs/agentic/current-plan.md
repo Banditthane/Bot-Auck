@@ -1,395 +1,284 @@
-# Executable Recovery Plan — TASK-20260722-002
+# Member Automation Plan — Auto Name, Auto Role, Command Help
 
-## Status
+Status: **PLANNER COMPLETE — HOST APPROVE/REJECT REQUIRED.** No coding, migration, deployment, or merge is authorized.
 
-**PLANNER COMPLETE — AWAITING HOST APPROVAL. ALL EXECUTION RESULTS REMAIN UNKNOWN.**
+## 1. Current Repository Findings
 
-Baseline inspected: `main` at `d6a926eb7ee2cf42e9ff2e7f1dc8c6a7de5e68ae`.
+Inspected real `main` at `de094ac479ff6c45eb42412896c796481de0591f` (ahead origin by 6).
 
-This is a plan only. The Planner did not open the runtime SQLite database, run migrations, modify WAL/SHM, start the bot, contact Discord, change dependencies, or edit production/business logic.
+**PASS / exists**
 
-## Root-cause hierarchy
+- Auto Name now has domain, DTOs/contracts, services, SQLite v1/repositories, Discord nickname gateway, telemetry adapter, persistent scan worker, `/autoname`, member add/update events, DI/Bootstrap/deploy wiring, and interface/composition tests.
+- `node --test test\auto-name\*.test.js` passed **53/53** during this planning inspection. This is deterministic local evidence only.
+- Existing command set is ping, room, room-setup, five moderation commands and autoname. EventLoader recursively discovers event `.js` files.
+- Discord.js `14.27.0`; `GuildMembers` intent is present in source; REST member pagination is available.
+- Auto Name runtime DB plus WAL/SHM now exist as untracked files. AutoRoom WAL/SHM are modified. They are user/runtime data and must not be touched blindly.
 
-### Primary startup blocker — verified from repository plus Host evidence
+**NEEDS-FIX / missing for new scope**
 
-1. `Bootstrap.initialize()` constructs `AutoRoomDatabase` before `app.start()`/Discord ready.
-2. `AutoRoomDatabase.migrate()` opens `BEGIN IMMEDIATE`, reads `PRAGMA user_version`, and routes version 4 directly through `_validateV4Schema()`.
-3. The v4 validator accepts only `state IN ('reserved', 'channel_created', 'orphaned')`.
-4. Host's read-only evidence says the live table has the v5 state CHECK including `cleaning`, while metadata remains `user_version=4` and one `reserved` row exists.
-5. The exact error `Database schema v4 reservation state constraint is invalid.` therefore occurs before Discord Client ready. The child reports only `UNKNOWN`, exits, and the manager eventually reports downstream `ShardingReadyTimeout`.
+- No Auto Role domain, schema, services, gateway, rules, command, worker/jobs, audit or tests.
+- No `/help`, command catalog, rich command metadata, presenters, component registry/router or persistent component session.
+- Current CommandRegistry stores name -> handler and cannot list rich metadata. Bootstrap and deploy script manually repeat command imports/lists.
+- `interactionCreate.js` routes chat-input commands only. Component routing must be added outside this file.
+- `/autoname` currently defaults to `ManageNicknames`; new brief requires setup/template/scan/repair/enable/disable to be Guild Owner or Administrator. Discord default permissions apply to the whole top-level command, not individual subcommands: setting Administrator hides preview/config/status too. Recommended default is Administrator for the entire group, with the tradeoff explicitly accepted.
+- Verification service contains comments only. No authoritative Level, Message Count, Verification Status, or Membership Duration repositories/events were found: **ARCHITECTURE DECISION REQUIRED** for these conditions.
+- Host-reported live `/autoname` deployment timeout was not reproduced here. Current network/deploy/live command state is **UNKNOWN**; do not conflate it with deterministic code status.
 
-The schema/metadata mismatch is the first deterministic blocker. `ShardingReadyTimeout` is a symptom, not an independent root cause.
+## 2. Scope And Decision Gates
 
-### Secondary network issue — separate and intermittent
+Ready to implement now:
 
-- `src/Index.js` uses `totalShards: "auto"`; discord.js must call the authenticated gateway-bot REST endpoint to discover the recommended shard count before spawning.
-- Host recorded an intermittent `UND_ERR_CONNECT_TIMEOUT` on that discord.js/undici path, while separate public/authenticated diagnostics succeeded and reported one recommended shard.
-- This can block manager startup before a child is created, but changing shard selection cannot repair the database and must not be presented as the database fix.
-- Current long-term frequency, proxy/VPN interaction, DNS family behavior, and reproducibility under a supported Node LTS runtime are **UNKNOWN**.
+- Auto Role rules for triggers `MEMBER_JOIN`, `ROLE_ADDED`, `MANUAL_SCAN`, `MANUAL_REPAIR`, based only on current Discord role IDs.
+- Multiple required/excluded/target/remove role IDs, priority, stopOnMatch, enabled state, audit, dry-run, persistent scans, idempotency, hierarchy and exclusive-group policies.
+- Default conflict policy `SKIP_IF_CONFLICT`.
+- Application Orchestrator coordination: Auto Role then Auto Name; neither service imports/calls the other.
+- Rich command manifest/catalog, embed presenters, `/help`, persistent owned sessions and component routing.
 
-### Diagnostic masking — verified from repository
+Decision required before corresponding production enablement:
 
-- `src/Shard.js` prints only `error.code ?? error.cause?.code ?? "UNKNOWN"`; schema errors are plain `Error` objects without a code.
-- `src/Index.js` sees the manager-level timeout rather than the earlier child root cause and does not retain a sanitized startup-error message from the child.
-- Respawn can repeat the failure and add noise while preserving neither a stable root-error code nor a causal summary.
+- Level/message-count/verification/membership-duration condition data sources.
+- True multi-host database/queue: local SQLite supports same-host processes, not separate local disks. PostgreSQL/Redis/BullMQ adapter choice is **ARCHITECTURE DECISION REQUIRED**.
+- Role removal policy and whether explicit removeRoleIds may remove roles not created by automation. Default: no removal except an explicitly approved conflict policy; SKIP_IF_CONFLICT.
+- Audit/session retention and personal-data access.
+- Entire `/autoname` Administrator visibility tradeoff.
+- Help language/content ownership and whether unavailable-but-local commands are shown.
+- Strict visual disabling of expired ephemeral components after process crash. Security expiry is persistent; visual disable is best effort unless storing a sensitive interaction token is approved.
 
-## Scope
+## 3. Proposed Architecture And ADRs
 
-### Phase 1 recovery/fix
-
-1. Add a narrowly defined, transactional recognition path for an exact valid-v5 reservation schema whose `user_version` is 4.
-2. Preserve every room, grant, guild config, reservation field/state, and counter; metadata repair may raise a lagging counter but never decrement one.
-3. Reject every partial, ambiguous, or malformed hybrid without mutation.
-4. Add stable startup error codes and bounded sanitized child-to-manager diagnostics.
-5. Make shard count explicitly configurable with a validated default of `1`, avoiding the optional recommended-shard REST lookup for this currently one-shard bot.
-6. Provide deterministic recovery tests and a controlled copy-first runbook.
-
-### Non-goals/prohibited changes
-
-- No blind deletion, rename, replacement, or direct hand-edit of `.sqlite`, `-wal`, or `-shm` files.
-- No dropping reservations, resetting reservation state, lowering/resetting counters, replaying room creation, or deleting orphan/channel records.
-- No changes to Auto Voice Room business behavior, command behavior/deployment, OAuth, production guild data, Discord permissions, or moderation work.
-- No package/dependency or lockfile upgrade. Node/runtime changes require separate evidence and approval.
-- No automatic backup of the live database from general bot startup; operations own backup/restore.
-- No live bot start, Discord deployment, or merge to `main` until deterministic/copy validation passes and Host explicitly authorizes it.
-
-## Recovery/migration strategy
-
-### Recommendation: production migration recognizer, not a one-time metadata repair tool
-
-Implement the repair in `AutoRoomDatabase` because:
-
-- the application already owns versioned, transactional, automatic migrations;
-- the observed state can be classified exactly as valid v5 schema plus stale v4 metadata;
-- all deployed copies that reached this same state need the same deterministic behavior;
-- a one-off script would duplicate private validators/migration rules and creates a greater risk of operator stamping an unvalidated database;
-- startup must remain fail-closed for any state outside the exact recognizer.
-
-This recommendation does **not** authorize migration of the live file. First prove the code against generated fixtures and a SQLite-consistent backup copy, then obtain Host authorization for controlled startup.
-
-### Exact classifier and transaction order
-
-Refactor reservation validation into structural checks plus an exact state-CHECK classifier. Do not branch by catching or matching an error message.
-
-For `currentVersion === 4`, while holding the existing `BEGIN IMMEDIATE` transaction:
-
-1. Validate all v1/v2 base tables, declared column types/order/nullability, primary key, `(guild_id, room_number)` unique constraint, `room_number >= 1` CHECK, and reservation row constraint validity.
-2. Classify the reservation state CHECK as exactly one of:
-   - canonical v4: `reserved`, `channel_created`, `orphaned`;
-   - canonical v5: the same set plus `cleaning`;
-   - invalid/ambiguous.
-3. Canonical v4: run the existing table-rebuild v4-to-v5 migration.
-4. Exact canonical v5 with metadata 4: validate with the full v5 validator, run only monotonic counter repair, then set `PRAGMA user_version = 5`. Do not rebuild/copy/drop the reservation table.
-5. Invalid/ambiguous: throw a stable schema error before any DDL/DML/version change.
-6. Commit only after post-repair `_validateV5Schema()` and counter invariants pass. Any failure rolls the complete transaction back.
-
-For `currentVersion === 5`, retain full v5 validation and monotonic counter repair. For versions 0–3, retain their existing migration path and add regression coverage. Versions above 5 remain unsupported and fail closed.
-
-### Data-preservation invariants
-
-Before and after an exact hybrid repair, assert equality of:
-
-- every row and column in `auto_rooms`, `room_grants`, and `auto_room_number_reservations`;
-- every guild-config field except `next_room_number` may only increase when below `max(active room number, reserved room number) + 1`;
-- reservation IDs, guild IDs, room numbers, timestamps, nullable channel IDs, and states including `cleaning`;
-- row counts, primary/unique constraints, foreign keys, and `PRAGMA integrity_check`/`foreign_key_check` results;
-- no temporary migration table left behind.
-
-Metadata may change only from 4 to 5 for the exact recognized hybrid. A failed repair preserves version 4, all rows/counters, and schema SQL byte-for-byte as observed through `sqlite_master`.
-
-### Idempotency and concurrency
-
-- First exact-hybrid open performs the metadata repair under `BEGIN IMMEDIATE`.
-- Concurrent openers wait under the configured 5000 ms busy timeout; after the first commit they observe version 5 and validate normally.
-- Reopen performs no schema rebuild and preserves rows/counters.
-- A lock timeout is a safe failure and must never trigger fallback stamping or deletion.
-- Tests must use separate SQLite handles/processes and a temporary file, not only `:memory:`.
-
-## Startup diagnostics strategy
-
-### Stable error classification
-
-Introduce a small shared startup-error sanitizer and stable internal codes. Database validation/migration failures use a code such as `AUTO_ROOM_SCHEMA_INVALID`; lock exhaustion uses its sanitized SQLite code; network timeout remains `UND_ERR_CONNECT_TIMEOUT`; unknown errors remain `STARTUP_UNKNOWN`.
-
-Expose only:
-
-- allowlisted/stable code;
-- bounded, single-line, control-character-stripped operational message;
-- startup phase (`database`, `bootstrap`, `discord-login`, or `shard-manager`) where known.
-
-Never include token, environment values, DB filename, SQL, row content, stack, request headers, authorization data, raw Discord response body, or arbitrary `error.message` from unknown errors.
-
-### Child-to-manager propagation
-
-- `src/Shard.js` sanitizes the root/cause chain, logs one clear child failure, sends a small typed IPC payload to its parent when `process.send` exists, and exits non-zero.
-- `src/Index.js` attaches a message listener to each created shard, accepts only the expected typed payload, sanitizes again, and stores the latest startup failure by shard ID.
-- When `manager.spawn()` rejects with a downstream ready timeout, the manager output leads with the retained child root (`AUTO_ROOM_SCHEMA_INVALID`) and then names `ShardingReadyTimeout` as downstream.
-- If no trusted child payload exists, retain the existing safe manager-level classification.
-- Unit tests exercise formatting and IPC handlers without spawning Discord or loading `.env` secrets. Refactor startup entrypoints behind `require.main === module` or injectable functions so importing tests has no side effect.
-
-## Narrow shard/network strategy
-
-### Recommended default
-
-Replace unconditional `totalShards: "auto"` with a validated `SHARD_COUNT` configuration:
-
-- absent -> numeric `1`;
-- present -> positive safe integer within a conservative bound defined by the implementation;
-- invalid -> fail before manager creation with `SHARD_COUNT_INVALID` and no token output.
-
-Use the numeric value in `ShardingManager`. This removes only the recommended-count preflight implicated in the intermittent timeout. It does not bypass the network required for gateway login and does not claim to solve the database crash or every timeout.
-
-Host evidence reports Discord currently recommends one shard, so default `1` is the least-complex recovery choice. Auto-discovery/retry can be a later separately tested feature if scale requires it. Do not add a custom REST retry loop now: it adds startup delay/complexity and does not help the schema error.
-
-Keep Node `v24.15.0`, discord.js `14.27.0`, and nested undici `6.27.0` unchanged in Phase 1. Whether another Node LTS changes timeout frequency is **UNKNOWN** and should be tested later with a controlled runtime matrix rather than assumed.
-
-## Workstreams and exact ownership
-
-No owner edits outside its list. Workstreams A and B can run in parallel after error-code/payload names are frozen in the approved plan.
-
-### Workstream A — schema classification and preservation (Coder A)
-
-Own:
-
-- `src/infrastructure/database/AutoRoomDatabase.js`
-- `src/infrastructure/database/AutoRoomDatabaseError.js` (new, if a typed error is used)
-- `test/auto-voice-room/repository.test.js`
-
-Deliver exact-hybrid recognition, stable schema codes, preservation assertions, malformed rejection, concurrency, and idempotency tests. Do not open or copy the live database.
-
-### Workstream B — startup/shard diagnostics and configuration (Coder B)
-
-Own:
-
-- `src/Shard.js`
-- `src/Index.js`
-- `src/shared/errors/StartupErrorSanitizer.js` (new)
-- `.env.example` (only add non-secret `SHARD_COUNT=1` documentation)
-- `test/startup/startup-errors.test.js` (new)
-- `test/startup/shard-config.test.js` (new)
-
-Deliver side-effect-free test seams, typed/sanitized IPC propagation, numeric shard configuration, and timeout-vs-child-root reporting. Do not alter token validation or contact Discord.
-
-### Workstream C — integration owner
-
-Own no additional production files. Integrate A then B, resolve only contract-name mismatches in the owning branch, and run all deterministic validation. If a shared change becomes necessary, Host must assign it explicitly before editing.
-
-### Reviewer
-
-No production ownership during review. Review transaction boundaries, exact schema classification, counter monotonicity, raw-error leakage, IPC trust boundary, side effects on module import, and separation of schema/network causes.
-
-### Tester
-
-Own test evidence and disposable temp/copy artifacts only. Do not modify source DB/WAL/SHM. Controlled copy validation and live startup are separate gates; live startup requires explicit Host authorization.
-
-## Dependency graph and integration order
+Dependency direction remains Interfaces -> Application -> Domain; Infrastructure implements Application ports.
 
 ```text
-Host approves plan and stable error/IPC names
-          |                         |
-          v                         v
-Workstream A: DB recovery      Workstream B: startup diagnostics/config
-          |                         |
-          +------------+------------+
-                       v
-             Integrate A then B
-                       v
-       Generated-fixture deterministic tests
-                       v
-             Reviewer -> fix loop
-                       v
-        Tester full regression evidence
-                       v
-    Stop writers + SQLite-consistent backup
-                       v
-       Recovery rehearsal on backup copy
-                       v
-            Host authorization gate
-                       v
-       Controlled live start (no deploy)
+Discord events/commands/components
+  -> MemberAutomationOrchestrator / AutoRole services / AutoName services / Help service
+  -> pure entities, plans, policies, metadata entries
+  -> repositories/gateways/catalog/job/session/operation ports
+  <- SQLite adapters, Discord adapters, registry catalog, presenters
 ```
 
-## Deterministic test matrix
+**ADR-01 Coordination — choose Application Orchestrator.** It receives both independently configurable services. Join flow evaluates Auto Role, applies a role plan, refetches facts, then invokes Auto Name if enabled/eligible. Alternatives: event bus/domain event. Orchestrator is deterministic and needs no new broker; risk is a longer use case, mitigated by typed step results. AutoRoleService never imports AutoNameService.
 
-### Schema/recovery
+**ADR-02 Jobs — shared logical and physical model.** Add `member_automation_jobs` and migrate Auto Name scan jobs into it during DB v1->v2. Both scan services use `MemberAutomationJobRepository`. This avoids two lease implementations/status semantics. Migration is additive/copy-validated and cannot run live without backup/Host gate.
 
-1. Pristine canonical v4 with all three v4 states -> v5; preserve every field/row and raise counter only when required.
-2. Existing canonical v5 -> validate/reopen without rebuild or data change.
-3. Exact hybrid: v5 columns/CHECK plus `user_version=4`, including `reserved`, `channel_created`, `orphaned`, and `cleaning` rows across guilds -> metadata 5, every row preserved, counters monotonic.
-4. Observed minimal hybrid shape: one `reserved` row and a lagging/non-lagging counter variant.
-5. Malformed hybrid variants: missing/extra/reordered/wrong-type columns, wrong nullability/PK/unique/CHECK, additional or missing state, malformed room-number CHECK, constraint-valid schema containing invalid rows, and foreign-key/integrity failure -> fail closed with version/schema/rows/counters unchanged.
-6. A v4 schema containing `cleaning` data but without the exact v5 CHECK cannot exist through constraints; any handcrafted ambiguous variant fails without table rebuild.
-7. Failure injected before validation, after counter repair, and before version stamp -> whole transaction rolls back.
-8. Two handles and multiple processes opening the exact hybrid concurrently -> one repair, remaining opens validate v5; no duplicate columns/temp tables/data loss.
-9. Repeated `migrate()` and close/reopen after recovery -> idempotent.
-10. Existing v0/v1/v2/v3 migration tests, canonical v4-to-v5 tests, version >5 rejection, reservation fencing, and multi-process allocation remain green.
+**ADR-03 Command source of truth — command manifest.** A single manifest imports each command object and supplies category/security/help metadata. Bootstrap registers manifest descriptors; deploy maps the same descriptors to `data.toJSON()`; RegistryCommandCatalog reads runtime registry. Descriptions/options come from SlashCommandBuilder JSON, enriched fields exist only in manifest.
 
-Use real temporary SQLite files for file/WAL/concurrency cases. Fixtures may create their own WAL/SHM inside OS temp directories and must clean up only those known temp paths.
+**ADR-04 Role operations — saga, not false atomicity.** Discord cannot atomically add/remove multiple roles. Service computes an immutable RoleChangePlan; gateway executes ordered steps; a persisted operation records correlation/expected role diff. Compensation and repair handle partial failure.
 
-### Startup/error propagation
+## 4. Exact Files To Create
 
-1. Plain schema error is converted to stable `AUTO_ROOM_SCHEMA_INVALID` with safe phase/message.
-2. Nested cause traversal finds allowlisted codes without serializing the cause object.
-3. Token-like text, database paths, SQL, newlines/control characters, long messages, stack, headers, and row content never appear in child log, IPC payload, or manager summary.
-4. Unknown errors produce `STARTUP_UNKNOWN` and generic copy.
-5. Trusted child IPC plus manager `ShardingReadyTimeout` reports root first and downstream timeout second.
-6. Malformed/untrusted IPC payload is ignored safely.
-7. `UND_ERR_CONNECT_TIMEOUT` before shard creation retains its distinct network guidance and does not mention schema.
-8. Importing `src/Shard.js` and `src/Index.js` under tests does not bootstrap, spawn, read secrets into output, or set failure exit state.
-9. `SHARD_COUNT` absent -> number 1; valid value -> that number; zero, negative, fractional, non-numeric, or excessive value -> stable safe failure.
-10. Injected fake manager receives numeric `totalShards`; no real REST, child, token, or Discord connection is used.
+| Exact path(s) | Layer | Responsibility | Dependencies | Reason |
+|---|---|---|---|---|
+| `src/domain/entities/AutoRoleRule.js`; `RoleChangePlan.js`; `CommandHelpEntry.js` | Domain | rule invariants, immutable add/remove plan, help entry | value objects only | pure models |
+| `src/domain/valueObjects/AutoRoleTrigger.js`; `RoleConflictPolicy.js`; `RoleRulePriority.js` | Domain | frozen enums/bounds | none | reject invalid rules |
+| `src/domain/policies/AutoRolePolicy.js`; `CommandVisibilityPolicy.js` | Domain | rule/conflict/visibility decisions | entities/errors | pure policy |
+| `src/domain/errors/AutoRoleErrors.js`; `CommandHelpErrors.js` | Domain | stable safe codes | none | boundaries |
+| `src/application/dto/CreateAutoRoleRuleDto.js`; `UpdateAutoRoleRuleDto.js`; `EvaluateAutoRoleDto.js`; `ScanAutoRoleDto.js`; `GetCommandHelpDto.js` | Application | validate primitive inputs | domain values | no interactions |
+| `src/application/repositories/contracts/AutoRoleConfigRepository.js`; `AutoRoleRuleRepository.js`; `AutoRoleAuditRepository.js`; `MemberRoleGateway.js`; `MemberAutomationJobRepository.js`; `MemberAutomationOperationRepository.js`; `InteractionSessionRepository.js`; `CommandCatalog.js` | Ports | storage/provider/catalog/session contracts | primitives/entities | adapter independence |
+| `src/application/services/AutoRoleRuleService.js`; `AutoRoleService.js`; `AutoRoleScanService.js`; `MemberAutomationOrchestrator.js`; `CommandHelpService.js` | Application | CRUD/evaluate/apply/scan/coordinate/help | injected ports/policies | pure use cases |
+| `src/infrastructure/database/repositories/SqliteAutoRoleConfigRepository.js`; `SqliteAutoRoleRuleRepository.js`; `SqliteAutoRoleAuditRepository.js`; `SqliteMemberAutomationJobRepository.js`; `SqliteMemberAutomationOperationRepository.js`; `SqliteInteractionSessionRepository.js` | Infrastructure | SQLite adapters | AutoNameDatabase connection | v2 persistence |
+| `src/infrastructure/providers/discord/DiscordMemberRoleGateway.js` | Infrastructure | fresh facts, paged members, role add/remove/refetch | discord.js client | provider boundary |
+| `src/infrastructure/workers/InProcessMemberAutomationWorker.js` | Infrastructure | lease/heartbeat/bounded job execution | job port/services/timers | same-host Phase 1 |
+| `src/infrastructure/commandCatalog/RegistryCommandCatalog.js` | Infrastructure | registry -> help entries | CommandRegistry | help source |
+| `src/interfaces/discord/commands/manifest.js` | Composition manifest | one command list plus metadata | command modules | eliminate duplicate lists |
+| `src/interfaces/discord/commands/admin/auto-role/command.js`; `handler.js`; `components.js` | Interface | autorole metadata/thin handler/session UI | services/presenters/discord.js | command group |
+| `src/interfaces/discord/commands/utility/help/command.js`; `handler.js`; `components.js` | Interface | help command/navigation | help service/presenter | help UX |
+| `src/interfaces/discord/presenters/EmbedPresenter.js`; `AutoNamePresenter.js`; `AutoRolePresenter.js`; `HelpPresenter.js` | Interface | result DTO -> embeds/components | discord.js builders | no embeds in services |
+| `src/interfaces/discord/adapters/HelpComponentAdapter.js`; `AutoRoleComponentAdapter.js` | Interface | validate custom ID/guild/owner/expiry | session repo/services | safe components |
+| `src/core/registry/ComponentRegistry.js`; `src/core/pipeline/ComponentRouter.js` | Core | register/route components | adapters/responder/logger | keep event thin |
+| `docs/adr/member-automation-coordination.md`; `docs/adr/member-automation-jobs.md`; `docs/adr/command-metadata.md` | Docs | decisions/alternatives/risks | plan evidence | durable ADRs |
+| `test/member-automation/domain.test.js`; `repositories.test.js`; `services.test.js`; `orchestrator-events.test.js`; `scan-worker.test.js`; `commands-components.test.js`; `test/command-help/catalog-service.test.js`; `presenters.test.js`; `navigation.test.js`; `test/member-automation/composition-deploy.test.js` | Tests | deterministic matrix | fakes/temp SQLite | validation |
 
-### Regression
+## 5. Exact Files To Modify
 
-- Full `test/auto-voice-room/*.test.js` passes, including persistence/reservation/reconciliation behavior.
-- Startup suites pass independently.
-- No command deployment tests or production startup are needed for deterministic gate unless an owned change affects them.
+| Exact path | Layer | Responsibility/change | Dependencies | Reason |
+|---|---|---|---|---|
+| `src/infrastructure/database/AutoNameDatabase.js` | Infrastructure | transactional v1->v2 Member Automation schema | better-sqlite3 | preserve existing DB |
+| `src/infrastructure/database/repositories/SqliteAutoNameScanQueue.js` | Infrastructure | adapt Auto Name jobs to shared job port/table | v2 DB | ADR-02 |
+| `src/application/services/index.js` | Composition factory | construct new services | injected ports | DI |
+| `src/core/bootstrap/Bootstrap.js` | Composition | construct repos/gateways/catalog/worker/routers; lifecycle | client/container | integration |
+| `src/core/registry/CommandRegistry.js` | Core | descriptor registration, `list()`, backward-compatible get | manifest | help/catalog |
+| `src/interfaces/discord/events/client/interactionCreate.js` | Interface | delegate chat vs component router only | two routers | integration point |
+| `src/interfaces/discord/events/member/guildMemberAdd.js`; `guildMemberUpdate.js` | Interface | invoke orchestrator and persisted loop correlation | orchestrator/operation port | coordination |
+| `src/interfaces/discord/commands/admin/auto-name/command.js`; `handler.js` | Interface | Administrator default/runtime, presenter results | service/presenter | new security/embed rule |
+| `src/scripts/deploy-commands.js` | Script | consume manifest, preserve complete set | manifest | one source; never execute in coding |
+| `.env.example` | Config docs | non-secret DB/worker/session limits | none | operations |
+| `test/auto-name/commands-events.test.js`; `composition-deploy.test.js`; `test/auto-voice-room/composition-deploy.test.js` | Tests | new admin/manifest/orchestrator regression | fakes | backward compatibility |
 
-All pass/fail counts and live results are **UNKNOWN** until Tester records them.
+These shared files are already dirty: service factory, Bootstrap, deploy script and Auto Voice composition test. Integration owner alone edits them. Do not rewrite Moderation or AutoRoom.
 
-## Operational backup, rehearsal, and rollback runbook
+## 6. Database V2, Contracts, Migration And Rollback
 
-These are post-implementation steps for an authorized operator, not actions performed by Planner/Coder.
+Add transactionally to the existing dedicated Auto Name DB:
 
-### Gate 0 — preserve current evidence
+- `guild_auto_role_configs(guild_id PK,enabled,removal_semantics,created_at,updated_at)`.
+- `auto_role_rules(rule_id PK,guild_id,name,enabled,trigger,priority,exclusive_group,conflict_policy DEFAULT SKIP_IF_CONFLICT,stop_on_match,created_by,created_at,updated_at,deleted_at)`; partial `UNIQUE(guild_id,name) WHERE deleted_at IS NULL`; index guild/enabled/trigger/priority.
+- Four link tables `auto_role_rule_required_roles`, `excluded_roles`, `target_roles`, `remove_roles`: FK rule cascade and `PRIMARY KEY(rule_id,role_id)`. Store Discord Role IDs only.
+- `auto_role_audit_logs(id PK,guild_id,user_id,rule_id,action,role_id,result,actor_id,trace_id,error_code,created_at)`; indexes guild/time and rule/time.
+- `member_automation_jobs(job_id PK,guild_id,job_type,status,scope_id,options_json,cursor,total_members,processed_members,success_count,skipped_count,failed_count,retry_count,lease_owner,lease_until,last_error_code,created_by,trace_id,timestamps)`; boolean/count CHECKs; partial unique active index by guild/job_type/scope.
+- `member_automation_operations(operation_id PK,guild_id,user_id,source,trace_id,expected_add_json,expected_remove_json,status,expires_at,timestamps)`; index guild/user/expiry.
+- `interaction_sessions(session_id PK,session_type,guild_id,owner_id,state_json,status,message_id,expires_at,timestamps)`; index owner/expiry.
 
-1. Record commit, runtime version, configured DB path, file names/sizes/timestamps, and sanitized startup errors. Do not print `.env` values or DB rows.
-2. Stop nodemon, ShardingManager, shard children, and every process that can open the database. Verify no bot process remains.
-3. Do not delete existing `-wal` or `-shm`; their presence may contain committed pages not yet checkpointed.
+Migration v1->v2: stop all bot writers; SQLite backup API; rehearse on a disposable copy; `BEGIN IMMEDIATE`; validate v1; create v2 tables; copy every `auto_name_scan_jobs` row to shared jobs as `AUTO_NAME_SCAN` preserving IDs/status/counts/cursor/lease; switch adapter; validate counts/digests/integrity/foreign keys; stamp v2 last; commit. Keep the old table renamed `auto_name_scan_jobs_v1_backup` for one release or until Host approves removal. Reopen must be idempotent. Any error rolls back.
 
-### Gate 1 — SQLite-consistent backup
+Rollback: stop workers/processes, preserve failed DB set, restore verified consistent backup with no open handles; never mix/delete WAL/SHM generations. No live migration until Reviewer/Test copy rehearsal and explicit Host approval.
 
-Preferred: use SQLite's online backup API (available through the installed `better-sqlite3`) from the source database to a new timestamped backup file on the same trusted volume while all application writers are stopped. This creates a consistent snapshot that incorporates committed WAL state without manually copying/deleting sidecars.
+## 7. Auto Role Evaluation, Conflict And Runtime Flows
 
-Requirements:
+Rules are loaded by guild/trigger, enabled only, ordered priority descending then ruleId for determinism. Required roles are ALL; any excluded role denies. stopOnMatch stops after the first matched rule. Existing target roles return `ALREADY_ASSIGNED` and never call Discord. Each target is evaluated separately and summarized assigned/existing/failed.
 
-- destination must not already exist;
-- close the backup handle cleanly;
-- record SHA-256, byte size, `PRAGMA user_version`, `PRAGMA integrity_check`, `PRAGMA foreign_key_check`, table row counts, per-table aggregate digests, and relevant `sqlite_master` SQL digest without logging actual row content;
-- retain the untouched source `.sqlite`, `-wal`, and `-shm` files as the rollback set until acceptance.
+Before each mutation, fresh gateway facts verify: target not bot/owner; bot has ManageRoles; role not managed/everyone; every add/remove role is below bot highest role; rule/config still enabled; target current roles. Commands also require owner/Administrator.
 
-If the backup API fails, stop. Do not fall back to copying only the main `.sqlite`. A filesystem copy of the database plus WAL/SHM is allowed only as an atomic/coherent set after all writers are stopped and platform-specific consistency is proven; otherwise status is **BLOCKED** pending operator guidance.
+Exclusive policy:
 
-### Gate 2 — rehearsal on copy
+- `SKIP_IF_CONFLICT` default: no group mutation.
+- `KEEP_EXISTING`: keep current group role and skip incoming target.
+- `REPLACE_LOWER_PRIORITY`: replace only when incoming rule outranks current owning rule.
+- `REPLACE_ALL_IN_GROUP`: explicitly approved removal of all other group roles.
+- Exclusive rules must have exactly one target role. Never remove outside group or explicit removeRoleIds.
 
-1. Duplicate the consistent backup to a disposable recovery candidate; never rehearse against the original backup.
-2. Capture pre-recovery metadata/digests listed above.
-3. Point `AUTO_ROOM_DB_PATH` only to the disposable candidate and invoke the integrated database initialization once.
-4. Verify exact transition 4 -> 5, full v5 validation, integrity/foreign-key checks, row/digest equality, allowed monotonic counter behavior, and absence of temp tables.
-5. Open the candidate again and prove no second mutation.
-6. Run the full deterministic test suite. Any mismatch stops the process; preserve source and backup unchanged.
+Saga: persist operation -> add desired role -> remove approved old roles -> refetch -> complete/audit. If removal fails after add, try removing newly added role; if compensation fails, mark `PARTIAL_CONFLICT`, audit every role result and enqueue repair. Discord has no true transaction; never report atomic success falsely.
 
-### Gate 3 — controlled live recovery/startup
+Flows:
 
-Only after Reviewer PASS, Tester PASS, copy rehearsal PASS, and explicit Host authorization:
+- Join: orchestrator loads MEMBER_JOIN rules, evaluates/applies, refetches, then Auto Name if separately enabled.
+- Role added: adapter diffs old/new, checks persisted operation correlation, evaluates only affected ROLE_ADDED rules. Bot-caused correlated events are not recursively re-applied; orchestrator already performs Auto Name continuation.
+- Manual scan/repair: admin enqueues; worker pages members, filters, processes bounded concurrency, persists progress/retry/status. Handler never loops server members.
+- Cache is optimization only; DB rules/jobs/operations and gateway refetch are sources of truth.
 
-1. Ensure all bot writers remain stopped and make a fresh SQLite-consistent backup.
-2. Start exactly one bot manager with numeric shard count 1 against the live DB. Do not deploy commands.
-3. Observe one migration transaction and confirm sanitized log reports schema recovery/validation without row data.
-4. Confirm metadata is 5, integrity checks pass, counts/digests match allowed invariants, and bot reaches ready.
-5. Stop immediately on any schema, integrity, permission, or repeated-respawn error.
+### Required Additional Analysis Checklist
 
-### Rollback
+1. **Auto Role Rule Evaluation:** enabled trigger match, priority-desc/ruleId order, ALL-required, ANY-excluded, stopOnMatch.
+2. **Existing Role Detection:** fresh IDs; existing targets return ALREADY_ASSIGNED without API.
+3. **Role Conflict Resolution:** frozen four policies; SKIP_IF_CONFLICT default; immutable change plan.
+4. **Role Hierarchy Validation:** bot ManageRoles, non-managed roles, strict bot-role superiority before every step.
+5. **Role Event Loop Protection:** persisted correlated operation is truth; optional TTL cache only optimizes.
+6. **Bulk Role Scan Strategy:** persistent lease, REST pages, bounded batch/concurrency/retry, handler enqueue only.
+7. **Auto Name And Auto Role Coordination:** Application Orchestrator, independent enablement, no service-to-service import.
+8. **Shared Member Automation Job Model:** v2 shared table/port, copy-migrate Auto Name jobs, PostgreSQL adapter later.
+9. **Embed Presenter Architecture:** interfaces only; application returns result DTOs.
+10. **Command Metadata Source Of Truth:** one manifest consumed by registry, deployment and Help catalog.
+11. **Help Navigation And Component Routing:** ComponentRegistry/Router plus thin adapters, not logic in interactionCreate.
+12. **Help Permission Filtering:** effective permission UX filter; every command handler reauthorizes.
+13. **Discord Interaction Timeout Handling:** defer immediately; long work enqueues; component/session expiry is bounded.
+14. **Component Session Ownership:** persisted guild+owner+expiry validation on every action.
+15. **Pagination Strategy:** stable sorted catalog/rules, bounded page size and clamped previous/next.
+16. **Backward Compatibility:** registry keeps name/get execution behavior while descriptors/list are added; exact manifest/deploy regression prevents command loss.
+## 8. Commands, Sessions, Embeds And Help
 
-1. Stop all bot processes before restore.
-2. Preserve the failed post-recovery database set separately for diagnosis; do not overwrite the last known-good backup.
-3. Restore from the verified SQLite-consistent backup using an operator-approved SQLite restore/copy procedure while no handle is open. Never mix a restored main database with WAL/SHM from another generation.
-4. Verify checksum, integrity, foreign keys, schema version, and aggregate row digests before any restart.
-5. Revert the application candidate to the pre-recovery commit if startup code is implicated.
-6. Do not restart until Host approves the rollback evidence.
+`/autorole` subcommands: setup, rule-create, rule-edit, rule-delete, rule-enable, rule-disable, rule-list, rule-view, scan, scan-status, repair, preview, config. Top-level default Administrator, DM disabled; handler rechecks guild owner OR Administrator and bot ManageRoles.
 
-Rollback cannot undo external Discord actions, but this recovery path must reach database validation before client login and performs no Discord business mutation during migration.
+Create/edit begins with minimal options (name, trigger, first target, priority) then an ephemeral multi-step session: modal for text/numbers; Role Select menus for multiple required/excluded/target/remove IDs; select for conflict policy; buttons confirm/cancel. Session is persisted, owned by invoker+guild, expires (recommended 15 minutes), and critical state is never memory-only.
 
-## Risks and mitigations
+`/autorole scan rule:<id> missing-only dry-run force`; repair accepts member or rule subset; both enqueue where work may be large.
 
-| Risk | Impact | Required mitigation |
-|---|---|---|
-| Blindly stamping v5 | Corrupt/partial schema accepted | Exact structural/state classifier plus full v5 validation before stamp |
-| Rebuilding an already-v5 table | Row/state loss or unnecessary DDL | Exact hybrid path performs no table rebuild |
-| Copying only `.sqlite` with live WAL | Missing committed data/inconsistent backup | Stop writers and use SQLite backup API; never delete sidecars blindly |
-| Counter reset/decrement | Duplicate room numbers | Monotonic `MAX(current, active+1, reserved+1)` only |
-| Concurrent startup | Double migration/lock errors | Existing `BEGIN IMMEDIATE`, busy timeout, multi-handle/process tests |
-| Error output leaks secrets/data | Credential/privacy incident | Allowlist codes, bounded generic messages, sanitizer tests |
-| IPC spoof/malformed payload | Misleading diagnostics | Typed shape validation and re-sanitize in manager |
-| Fixed shard count hides future scaling need | Capacity issue later | Configurable positive integer; revisit with Discord evidence |
-| Assuming shard=1 fixes all network errors | False diagnosis | State explicitly that gateway login still uses network; monitor separately |
-| Dependency/runtime change masks issue | Larger unproven blast radius | No upgrades in Phase 1; controlled matrix later |
-| Respawn loop during bad schema | Log/process churn | Clear root diagnostic and controlled single-process recovery start |
+Manifest descriptor:
 
-## UNKNOWN and decision gates
+```js
+{ command, name, category, guildOnly, defaultMemberPermissions,
+  requiredBotPermissions, usage, examples, relatedCommands,
+  availability, help: { visible, order } }
+```
 
-- Cause that originally produced the transactional-looking hybrid state is **UNKNOWN**. The recovery must not infer that it was a normal interrupted current migration.
-- Live database integrity, foreign-key result, exact row counts/digests, counter value, and whether any committed pages exist only in WAL are **UNKNOWN** until authorized backup inspection.
-- Frequency/root of `UND_ERR_CONNECT_TIMEOUT` and behavior on alternative Node LTS releases are **UNKNOWN**.
-- Whether the current host uses a proxy/VPN/custom DNS/IPv6 path is **UNKNOWN**.
-- Live startup success after schema recovery is **UNKNOWN**.
-- Host must approve: automatic exact-hybrid recognizer; stable error/IPC contract; `SHARD_COUNT` default 1; backup location/retention/access; and controlled live-start window.
-- If policy forbids application-led metadata repair even after exact validation, reject this plan and commission a separately reviewed operator tool. Do not partially implement both paths.
+Registry stores descriptors and lists them; deployment and Help consume the same manifest. Backward-compatible command execution uses descriptor.command.execute.
 
-## Acceptance criteria
+`/help command:<name optional>` is guild-capable and available to all. Home categories: Administration, Moderation, Room, Utility, Member Automation. Detail derives command name/description/subcommands/options from builder JSON plus manifest usage/security/examples/relations/availability. Visibility policy filters by effective user permissions; this is UX only and handlers always reauthorize.
 
-### Coder A
+Component custom IDs use bounded `ma:<kind>:<sessionId>:<action>`; adapters validate format, guild, owner, expiry and current admin permission. Help supports category/command selects, home/previous/next/refresh. Pagination clamps bounds. On expiry, action is denied and components are disabled when the interaction/message token is still usable; after process crash visual disable is UNKNOWN but persisted expiry still prevents control.
 
-- Exact valid v5-shape/version-4 state transitions transactionally to version 5 without table rebuild or row/field loss.
-- Canonical v4 still follows v4-to-v5 rebuild; canonical v5 remains idempotent.
-- Malformed/ambiguous hybrids fail before mutation; injected failures roll back schema, metadata, rows, and counters.
-- Counter repair is monotonic and accounts for active rooms and every reservation state.
-- Required single-handle, reopen, two-handle, and multi-process tests are deterministic and use temp files only.
+Presenters alone import EmbedBuilder/components and produce Success, Error, Permission, Config, Rule List/Detail, Preview, Scan Progress/Result, Help Home/Category/Detail. They show trace ID for safe errors but never stack, SQL, token, path or raw error.
 
-### Coder B
+## 9. Dependency, DI, Security, Concurrency And Failure Rules
 
-- Child output and IPC expose stable sanitized root cause; manager preserves root-vs-downstream ordering.
-- No secret, DB path/content, SQL, stack, raw unknown error, or environment value is emitted.
-- Shard count is numeric/configurable with validated default 1; no discovery/retry/dependency expansion is introduced.
-- Modules are importable without startup side effects and tests use fake manager/process/logger boundaries.
+- No application/domain import of discord.js, SQLite, Redis/BullMQ, process/cluster or concrete logger.
+- Services receive repositories/gateways/job/session/operation/catalog/clock/id/telemetry by DI.
+- Auto Role and Auto Name enable independently. Only orchestrator coordinates.
+- Role IDs are validated snowflakes; names are display only.
+- Unique/transaction/lease constraints handle same-host shards/processes. Persistent operation records are loop protection source; short cache may optimize but never decide truth.
+- Rate limit honors retry-after; retry bounded/classified. Lease loss stops work. Permanent hierarchy/managed-role denial skips/audits.
+- Session state JSON and job options use versioned allowlisted schema; no arbitrary executable content.
+- Admin default metadata never replaces runtime owner/Admin checks.
+- Audit retention, removal semantics, multi-host adapters and missing condition sources gate production features.
 
-### Reviewer
+## 10. Test Matrix And Validation Commands
 
-- Confirms exact classifier cannot accept supersets/subsets/reordered malformed constraints or stamp before full validation.
-- Confirms transaction/rollback and preservation invariants, WAL-safe runbook, concurrency, and idempotency.
-- Confirms error sanitizer/IPC trust boundary and no token/data leakage.
-- Confirms network mitigation is narrow and never represented as the database fix.
-- Returns PASS or blocking findings with file/line evidence; no live run or merge recommendation without gates.
+Auto Role tests: existing target; partial missing targets; required incomplete; excluded present; managed/equal/higher role; bot/owner; disabled rule; deterministic priority/stopOnMatch; all conflict policies; add/remove partial failure and compensation; audit; dry-run; no duplicate API; loop correlation; join/role-added/manual triggers; Auto Name after required role; lease/resume/multiprocess.
 
-### Tester
+Help/component tests: home; direct autorole detail; general user hides admin; admin sees it; invisible metadata hidden; manifest equals registry/deploy; other user denied; wrong guild/custom ID denied; expiry denied/disabled; pagination bounds; refresh permission recheck; presenter tests without API; no raw error.
 
-- Records exact commands, exit codes, pass/fail counts, temp paths, runtime, and candidate commit.
-- Proves all required fixtures, concurrency/reopen, startup propagation, and secret-leak tests.
-- Runs the full Auto Voice Room suite with zero regressions.
-- Performs copy rehearsal only against an authorized SQLite-consistent backup and records before/after metadata/digest evidence without row contents.
-- Marks live Discord startup **UNKNOWN** unless Host separately authorizes and it is observed.
-
-### Operational acceptance
-
-- Verified backup exists before any live metadata change and rollback has been rehearsed or mechanically validated.
-- Live exact hybrid changes only allowed metadata/counter invariants, preserves every data row/field, and validates as v5.
-- Bot reaches ready once without a schema respawn loop; any network timeout is reported separately with its real sanitized code.
-- No deploy, dependency change, data deletion, WAL/SHM deletion, or main merge occurs.
-
-## Validation commands
-
-Run only on the integrated candidate from repository root. These deterministic commands must not point `AUTO_ROOM_DB_PATH` at production.
+Migration tests: pristine v1->v2, populated Auto Name jobs preserved, concurrent opens, rollback injection, malformed fail-closed, idempotent reopen, all rows/counters unchanged.
 
 ```powershell
-node --test test\auto-voice-room\repository.test.js
-node --test test\startup\startup-errors.test.js
-node --test test\startup\shard-config.test.js
+node --test test\member-automation\*.test.js
+node --test test\command-help\*.test.js
+node --test test\auto-name\*.test.js
 node --test test\auto-voice-room\*.test.js
+node --test test\moderation\*.test.js
 node --test test\startup\*.test.js
-node --check src\infrastructure\database\AutoRoomDatabase.js
-node --check src\infrastructure\database\AutoRoomDatabaseError.js
-node --check src\shared\errors\StartupErrorSanitizer.js
-node --check src\Shard.js
-node --check src\Index.js
+node --check src\application\services\AutoRoleService.js
+node --check src\application\services\AutoRoleRuleService.js
+node --check src\application\services\AutoRoleScanService.js
+node --check src\application\services\MemberAutomationOrchestrator.js
+node --check src\application\services\CommandHelpService.js
+node --check src\infrastructure\providers\discord\DiscordMemberRoleGateway.js
+node --check src\interfaces\discord\commands\admin\auto-role\command.js
+node --check src\interfaces\discord\commands\utility\help\command.js
+node --check src\core\registry\CommandRegistry.js
+node --check src\core\pipeline\ComponentRouter.js
+node --check src\core\bootstrap\Bootstrap.js
+node --check src\scripts\deploy-commands.js
 git diff --check
 ```
 
-If an optional new file is not used (for example `AutoRoomDatabaseError.js`), omit only its corresponding `node --check`. `npm test` is not a valid repository test command because it intentionally exits with an error.
+Also run `node --check` for every new/modified JS file and boundary grep tests. `npm test` intentionally fails. No deploy/live DB/network in deterministic validation. All new-suite/full-regression results are **UNKNOWN** until Tester runs.
 
-Copy-rehearsal commands must be supplied by Coder/Tester after the exact helper/test seam exists and must include an explicit disposable candidate path plus preflight rejection of the production path. Do not improvise inline SQL against the live database. Do not run `npm run deploy:commands`, start nodemon, or contact Discord during deterministic validation.
+## 11. Ownership And 19 Implementation Phases
 
-## File status and handoff
+Ownership: Coder A owns Auto Role Domain/Application/contracts/unit tests. Coder B owns v2 DB/repos/jobs/operations/sessions/migration tests. Coder C owns Discord gateway, commands/components/presenters/help adapters and interface tests. Integration owner alone owns manifest, registries/routers, service factory, Bootstrap, deploy script and dirty composition tests. Reviewer owns findings only; Tester owns evidence/temp copies only; Merge Agent integrates only after Host approval and never merges main without explicit user authority.
 
-Planner deliverable only: `docs/agentic/current-plan.md`.
+| Phase | Files/steps | Validation / expected result | Rollback point |
+|---|---|---|---|
+| 1 Inspect Registry/Router/Loader | current core; freeze manifest/router seams | source tests; documented baseline | docs only |
+| 2 Auto Name Domain/Contracts | existing files; freeze 53-pass behavior | auto-name domain/service | no change unless admin contract approved |
+| 3 Auto Name SQLite | v2 design/migration fixtures | copy migration preserves all v1 | restore fixture |
+| 4 Auto Name Services | preserve existing APIs; orchestrator port use | 53 tests remain green | revert coordination hunk |
+| 5 Auto Role Domain/Contracts | rule/plan/VO/policy/errors/DTO/ports | pure unit tests | remove new files |
+| 6 Auto Role SQLite | v2 tables/repos/audit | temp DB/concurrent/malformed tests | revert adapter; backup |
+| 7 Auto Role Services | CRUD/evaluate/saga/scan | isolated service tests | revert services |
+| 8 Discord Gateways | nickname regression + role gateway | fake Discord tests | remove role adapter |
+| 9 Orchestrator | join/role-added sequence | Auto Role -> Auto Name test | revert orchestrator |
+| 10 Auto Name Commands | Administrator/presenters | metadata/handler tests | revert interface hunk |
+| 11 Auto Role Commands | group + persistent config UI | command/session tests | remove new command |
+| 12 Events/Loop Protection | events + operation correlation | loop/race tests | revert event hunks |
+| 13 Shared Bulk Jobs | migrate adapter/worker/job table | lease/resume/allocation tests | DB backup/adapter revert |
+| 14 Embed Presenters | four presenters | snapshots/field/security tests | remove presenters |
+| 15 Metadata/Help Service | manifest/catalog/domain/service | registry=deploy=help tests | retain old registry API |
+| 16 Help Navigation | help/components/router/sessions | owner/expiry/pages tests | unregister help |
+| 17 DI/Bootstrap | shared integration files/lifecycle | composition + syntax | revert only integration hunks |
+| 18 Unit/Integration Tests | all new and regressions | exact pass counts/exit codes | no runtime effect |
+| 19 Diagnostics/Migration/Docs | ADRs, backup rehearsal, runbook | diff/secret/copy validation | restore verified backup |
 
-Host should approve or reject this plan. On approval, freeze the error codes/IPC payload and dispatch Workstreams A and B with the exact ownership above. Integrate, review, and test before authorizing any backup-copy rehearsal or live startup. No merge to `main` is authorized by this plan.
+Order: 1 -> 5 -> 6/7 -> 8 -> 9 -> 10/11 -> 12 -> 13 -> 14 -> 15 -> 16 -> 17 -> 18 -> 19, while Phases 2-4 are regression gates. Host approves each dispatch boundary.
+
+## 12. Risks, UNKNOWN And Prohibited Changes
+
+Risks: Discord role operations are non-atomic; partial compensation may fail. Exclusive-group ownership can be ambiguous; enforce one target for exclusive rules. Shared-job migration touches an existing runtime DB and requires stop/backup/rehearsal. Component expiry visual state may outlive process. Manifest migration may drop old commands if incomplete. Help visibility can drift from actual deployed state. Dirty Auto Name/Moderation/AutoRoom integration can be overwritten.
+
+UNKNOWN/decisions: all non-role data sources; live intents/permissions; live deploy/network timeout; guild/member scale; PostgreSQL/Redis; removal policy; audit/session retention; help language/content owner; actual deployed command set; component-token persistence; live migration.
+
+Prohibited: touch/delete current DB/WAL/SHM; role-name identifiers; direct AutoRole->AutoName import/call; application infrastructure imports; in-memory-only critical sessions/counters/jobs; unbounded scans/retries; cache as truth; EmbedBuilder in services/domain/repos; business rules in handlers/events; dependency additions without approval; token/raw errors; deploy; merge main; rewrite AutoRoom/Moderation.
+
+## 13. Definition Of Done And Host Handoff
+
+- Auto Name and Auto Role enable independently; orchestrator coordinates safely.
+- Multiple rules/targets, existing detection, hierarchy, priority, exclusion, conflicts, stopOnMatch, repair/audit and loop protection pass.
+- Shared scans are persistent, paged, bounded, resumable and multi-process tested.
+- Default removal is SKIP_IF_CONFLICT until explicitly changed.
+- Embed presentation is outside services.
+- Help home/direct detail/categories/pagination/permission filtering/session ownership/expiry read the single manifest/registry truth.
+- Owner/Admin rules exist in definitions and handlers; bot permissions are runtime checked.
+- DB v2 copy rehearsal preserves all Auto Name rows/jobs and rollback is proven.
+- New suites and full regressions pass independently; Reviewer has no blockers; Tester records evidence.
+- Live deploy/migration/Discord behavior remains UNKNOWN until separately authorized.
+- No main merge/deploy occurs from this plan.
+
+Planner verdict: **READY FOR HOST APPROVE/REJECT**, not ready for Coder dispatch until Host resolves or accepts defaults for removal policy, DB/job migration, Administrator visibility, retention and multi-host scope.

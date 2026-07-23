@@ -3,9 +3,7 @@ require("module-alias/register");
 
 const { REST, Routes } = require("discord.js");
 const Env = require("@infra/config/Env");
-const pingCommand = require("@commands/utility/ping/command");
-const roomCommand = require("@commands/room/command");
-const roomSetupCommand = require("@commands/admin/room-setup/command");
+const commandManifest = require("@commands/manifest");
 
 const SNOWFLAKE_PATTERN = /^\d{17,20}$/;
 const CONFIRM_REPLACEMENT_FLAG = "--confirm-replace";
@@ -48,11 +46,7 @@ async function deployCommands({ env, rest, confirmReplacement = false } = {}) {
   const config = loadDeploymentConfig(env);
   const client = rest ?? new REST({ version: "10" }).setToken(config.token);
   const route = Routes.applicationGuildCommands(config.clientId, config.guildId);
-  const body = [
-    pingCommand.data.toJSON(),
-    roomCommand.data.toJSON(),
-    roomSetupCommand.data.toJSON(),
-  ];
+  const body = commandManifest.map((descriptor) => descriptor.command.data.toJSON());
 
   await client.put(route, { body });
   return {
@@ -70,7 +64,7 @@ if (require.main === module) {
   const confirmReplacement = process.argv.slice(2).includes(CONFIRM_REPLACEMENT_FLAG);
 
   console.warn(
-    "[CommandDeploy] WARNING: this operation replaces the guild's complete command collection with the local /ping, /room, and /room-setup commands."
+    "[CommandDeploy] WARNING: this operation replaces the guild's complete command collection with the local command manifest."
   );
 
   deployCommands({ confirmReplacement })
